@@ -1,0 +1,5 @@
+vendor/
+runtime_data/
+.env
+*.venv/
+__pycache__/
