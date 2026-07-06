@@ -89,6 +89,10 @@ def _action_group(action: str) -> str:
     return "unknown"
 
 
+ENTRY_ACTIONS = {"buy", "add"}
+EXIT_ACTIONS = {"sell", "reduce", "avoid"}
+
+
 class SignalReader:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -132,7 +136,20 @@ class SignalReader:
         signals = [
             signal
             for signal in self.active_signals_before(execution_date)
-            if signal.action in {"buy", "add"}
+            if signal.action in ENTRY_ACTIONS
+        ]
+        consistent = []
+        for signal in signals:
+            advice = self.advice_for_signal(signal)
+            if self.is_s1_consistent(signal, advice):
+                consistent.append(signal)
+        return self._latest_by_symbol(consistent)
+
+    def exit_candidates(self, execution_date: date) -> List[DecisionSignal]:
+        signals = [
+            signal
+            for signal in self.active_signals_before(execution_date)
+            if signal.action in EXIT_ACTIONS
         ]
         consistent = []
         for signal in signals:
@@ -241,6 +258,32 @@ class SignalReader:
         with self._connect() as conn:
             row = conn.execute("select max(date) as max_date from stock_daily").fetchone()
         return parse_date(row["max_date"] if row else None)
+
+    def latest_stock_name(self, stock_code: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                select stock_name
+                from decision_signals
+                where stock_code = ? and stock_name is not null and stock_name != ''
+                order by datetime(created_at) desc, id desc
+                limit 1
+                """,
+                (stock_code,),
+            ).fetchone()
+            if row is not None:
+                return str(row["stock_name"])
+            row = conn.execute(
+                """
+                select name
+                from analysis_history
+                where code = ? and name is not null and name != ''
+                order by datetime(created_at) desc, id desc
+                limit 1
+                """,
+                (stock_code,),
+            ).fetchone()
+        return str(row["name"]) if row is not None else None
 
     def outcomes(self, start: date, end: date) -> List[sqlite3.Row]:
         with self._connect() as conn:

@@ -143,6 +143,7 @@ class PaperLedger:
             )
 
     def record_trade(self, fill: TradeFill) -> bool:
+        stored_signal_id = self._stored_signal_id(fill.signal_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -153,7 +154,7 @@ class PaperLedger:
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    fill.signal_id,
+                    stored_signal_id,
                     fill.stock_code,
                     fill.side,
                     fill.trade_date.isoformat(),
@@ -178,6 +179,7 @@ class PaperLedger:
         stop_loss: Optional[float] = None,
         target_price: Optional[float] = None,
     ) -> bool:
+        stored_signal_id = self._stored_signal_id(fill.signal_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -188,7 +190,7 @@ class PaperLedger:
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    fill.signal_id,
+                    stored_signal_id,
                     fill.stock_code,
                     fill.side,
                     fill.trade_date.isoformat(),
@@ -225,7 +227,7 @@ class PaperLedger:
         price: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        stored_signal_id = -1 if signal_id is None else signal_id
+        stored_signal_id = self._stored_signal_id(signal_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -257,7 +259,7 @@ class PaperLedger:
         reason: str,
         details: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        stored_signal_id = -1 if signal_id is None else signal_id
+        stored_signal_id = self._stored_signal_id(signal_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -288,6 +290,7 @@ class PaperLedger:
         reason: str,
         triggered_date: date,
     ) -> bool:
+        stored_signal_id = self._stored_signal_id(signal_id)
         now = datetime.utcnow().isoformat(sep=" ")
         with self._connect() as conn:
             cursor = conn.execute(
@@ -299,7 +302,7 @@ class PaperLedger:
                 values (?, ?, ?, ?, ?, ?, null, 'open', ?, ?)
                 """,
                 (
-                    signal_id,
+                    stored_signal_id,
                     stock_code,
                     shares,
                     stop_price,
@@ -310,6 +313,10 @@ class PaperLedger:
                 ),
             )
             return cursor.rowcount == 1
+
+    @staticmethod
+    def _stored_signal_id(signal_id: Optional[int]) -> int:
+        return -1 if signal_id is None else int(signal_id)
 
     def close_pending_exit(self, pending_id: int) -> None:
         with self._connect() as conn:

@@ -22,6 +22,7 @@ class ExecutorConfig:
     commission_rate: float = 0.00025
     min_commission: float = 5.0
     stamp_tax_rate: float = 0.0005
+    reduce_exit_rate: float = 0.50
     block_limit_up_open: bool = True
     block_limit_down_open: bool = True
     benchmark_codes: tuple = ("000300", "399300", "SH000300")

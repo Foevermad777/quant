@@ -13,6 +13,9 @@ class SignalReaderTests(unittest.TestCase):
         self.assertEqual(advice_to_action("持有"), "hold")
         self.assertEqual(advice_to_action("持有观察"), "hold")
         self.assertEqual(advice_to_action("观望"), "watch")
+        self.assertEqual(advice_to_action("卖出"), "sell")
+        self.assertEqual(advice_to_action("减仓"), "reduce")
+        self.assertEqual(advice_to_action("避免"), "avoid")
 
     @unittest.skipUnless(DSA_DB.exists(), "local DSA database is not present")
     def test_600900_s1_conflict_is_skipped(self) -> None:

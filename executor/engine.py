@@ -5,11 +5,11 @@ import hashlib
 import logging
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 from executor.config import QUANT_DIR, ExecutorConfig
 from executor.ledger import PaperLedger, TradeFill
-from executor.models import FeeModel, LimitFillModel, SlippageModel
+from executor.models import DecisionSignal, FeeModel, LimitFillModel, SlippageModel
 from executor.rules import (
     cap_order_shares,
     first_exit_trigger,
@@ -20,12 +20,14 @@ from executor.rules import (
 from executor.signal_reader import SignalReader, parse_date
 
 
-def _setup_logger(execution_date: date) -> logging.Logger:
-    QUANT_DIR.mkdir(parents=True, exist_ok=True)
+def _setup_logger(execution_date: date, log_dir: Path = QUANT_DIR) -> logging.Logger:
+    log_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("executor")
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    path = QUANT_DIR / f"executor_{execution_date:%Y%m%d}.log"
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    path = log_dir / f"executor_{execution_date:%Y%m%d}.log"
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
@@ -55,7 +57,7 @@ class PaperEngine:
         )
 
     def run_day(self, execution_date: date) -> Dict[str, int]:
-        logger = _setup_logger(execution_date)
+        logger = _setup_logger(execution_date, self.config.ledger_db_path.parent)
         self.ledger.initialize()
         before_md5 = md5_file(self.config.dsa_db_path) if self.config.dsa_db_path.exists() else ""
         analysis_count = self.reader.analysis_count_on(execution_date)
@@ -63,8 +65,10 @@ class PaperEngine:
         stats = {
             "analysis_count": analysis_count,
             "bars": len(bars),
+            "data_gaps": 0,
             "s1_conflicts": 0,
             "open_candidates": 0,
+            "exit_candidates": 0,
             "filled": 0,
             "unfilled": 0,
             "blocked": 0,
@@ -90,26 +94,25 @@ class PaperEngine:
                 },
             )
 
+        open_candidates = self.reader.open_candidates(execution_date)
+        stats["open_candidates"] = len(open_candidates)
+        self._record_data_gaps(execution_date, bars, stats)
+
         self._process_pending_exits(execution_date, logger, stats)
         self._process_position_triggers(execution_date, bars, logger, stats)
+        self._process_exit_signals(execution_date, bars, logger, stats)
 
         if analysis_count <= 0:
             logger.info("new_openings_skipped reason=no_analysis_history_for_date")
-        elif not bars:
+        elif not open_candidates:
+            logger.info("new_openings_skipped reason=no_open_candidates")
+        else:
             # Plan B note: if DSA does not persist same-day daily bars by 18:40,
             # schedule this command for next trading day 09:00 with execution_date
             # set to the completed trading date.
-            logger.info("new_openings_skipped reason=no_stock_daily_bars plan_b=next_day_0900")
-            self.ledger.record_event(
-                signal_id=None,
-                stock_code="__system__",
-                event_date=execution_date,
-                event_type="data_gap",
-                reason="no_stock_daily_bars_for_execution_date",
-                details={"plan_b": "run next trading day 09:00 for the completed trading date"},
-            )
-        else:
-            self._process_open_candidates(execution_date, bars, logger, stats)
+            if not bars:
+                logger.info("new_openings_degraded reason=no_stock_daily_bars plan_b=next_day_0900")
+            self._process_open_candidates(execution_date, bars, open_candidates, logger, stats)
 
         marks = {code: bar.close for code, bar in bars.items() if bar.close is not None}
         self.ledger.record_snapshot(execution_date, marks)
@@ -138,11 +141,10 @@ class PaperEngine:
         self,
         execution_date: date,
         bars: Dict[str, object],
+        candidates: Sequence[DecisionSignal],
         logger: logging.Logger,
         stats: Dict[str, int],
     ) -> None:
-        candidates = self.reader.open_candidates(execution_date)
-        stats["open_candidates"] = len(candidates)
         for signal in candidates:
             if signal.expires_at is not None and execution_date > signal.expires_at.date():
                 blocked = self.fill_model.expired_unfilled(signal, execution_date)
@@ -162,7 +164,7 @@ class PaperEngine:
                 self.config.block_limit_up_open
                 and bar is not None
                 and previous is not None
-                and is_limit_up_open(bar.open, previous.close, signal.stock_code)
+                and is_limit_up_open(bar.open, previous.close, signal.stock_code, is_st=self._is_st_stock(signal.stock_code, signal.stock_name))
             ):
                 self.ledger.record_order_attempt(
                     signal_id=signal.id,
@@ -250,6 +252,27 @@ class PaperEngine:
                 shares,
             )
 
+    def _record_data_gaps(self, execution_date: date, bars: Dict[str, object], stats: Dict[str, int]) -> None:
+        available = sorted(code for code in self.config.stock_pool if code in bars)
+        missing = sorted(code for code in self.config.stock_pool if code not in bars)
+        if not missing:
+            return
+        reason = "no_stock_daily_bars_for_execution_date" if not bars else "missing_stock_daily_bars_for_pool"
+        if self.ledger.record_event(
+            signal_id=None,
+            stock_code="__system__",
+            event_date=execution_date,
+            event_type="data_gap",
+            reason=reason,
+            details={
+                "available": available,
+                "missing": missing,
+                "expected": list(self.config.stock_pool),
+                "plan_b": "run DSA gap backfill, then rerun executor for the completed trading date",
+            },
+        ):
+            stats["data_gaps"] += 1
+
     def _process_pending_exits(self, execution_date: date, logger: logging.Logger, stats: Dict[str, int]) -> None:
         for pending in self.ledger.open_pending_exits_before(execution_date):
             bar = self.reader.bar(pending["stock_code"], execution_date)
@@ -259,7 +282,7 @@ class PaperEngine:
             if (
                 self.config.block_limit_down_open
                 and previous is not None
-                and is_limit_down_open(bar.open, previous.close, pending["stock_code"])
+                and is_limit_down_open(bar.open, previous.close, pending["stock_code"], is_st=self._is_st_stock(pending["stock_code"]))
             ):
                 self.ledger.record_order_attempt(
                     signal_id=pending["signal_id"],
@@ -300,7 +323,7 @@ class PaperEngine:
             if (
                 self.config.block_limit_down_open
                 and previous is not None
-                and is_limit_down_open(bar.open, previous.close, position["stock_code"])
+                and is_limit_down_open(bar.open, previous.close, position["stock_code"], is_st=self._is_st_stock(position["stock_code"]))
             ):
                 self.ledger.record_order_attempt(
                     signal_id=position["source_signal_id"],
@@ -321,6 +344,78 @@ class PaperEngine:
                 stats=stats,
             )
             logger.info("position_exit_trigger code=%s reason=%s", position["stock_code"], trigger.reason)
+
+    def _process_exit_signals(
+        self,
+        execution_date: date,
+        bars: Dict[str, object],
+        logger: logging.Logger,
+        stats: Dict[str, int],
+    ) -> None:
+        candidates = self.reader.exit_candidates(execution_date)
+        stats["exit_candidates"] = len(candidates)
+        for signal in candidates:
+            position = self.ledger.position(signal.stock_code)
+            if position is None:
+                self.ledger.record_event(
+                    signal_id=signal.id,
+                    stock_code=signal.stock_code,
+                    event_date=execution_date,
+                    event_type="exit_signal_no_position",
+                    reason=f"{signal.action}_without_position",
+                    details={"source_report_id": signal.source_report_id},
+                )
+                continue
+            bar = bars.get(signal.stock_code)
+            if bar is None:
+                self.ledger.record_order_attempt(
+                    signal_id=signal.id,
+                    stock_code=signal.stock_code,
+                    trade_date=execution_date,
+                    status="unfilled",
+                    reason="exit_signal_missing_bar",
+                )
+                stats["unfilled"] += 1
+                continue
+            previous = self.reader.previous_bar(signal.stock_code, execution_date)
+            if (
+                self.config.block_limit_down_open
+                and previous is not None
+                and is_limit_down_open(bar.open, previous.close, signal.stock_code, is_st=self._is_st_stock(signal.stock_code, signal.stock_name))
+            ):
+                self.ledger.record_order_attempt(
+                    signal_id=signal.id,
+                    stock_code=signal.stock_code,
+                    trade_date=execution_date,
+                    status="unfilled",
+                    reason="unfilled_limit_down",
+                    price=bar.open,
+                )
+                stats["unfilled"] += 1
+                continue
+            max_shares = self._exit_signal_max_shares(position, signal.action)
+            self._sell_position(
+                signal_id=signal.id,
+                stock_code=signal.stock_code,
+                execution_date=execution_date,
+                fill_price=bar.open,
+                reason=f"signal_{signal.action}",
+                max_shares=max_shares,
+                stats=stats,
+            )
+            logger.info("exit_signal_processed signal_id=%s code=%s action=%s", signal.id, signal.stock_code, signal.action)
+
+    def _exit_signal_max_shares(self, position: object, action: str) -> int:
+        old_quantity = int(position["old_quantity"])
+        if action == "reduce":
+            shares = int(old_quantity * self.config.reduce_exit_rate)
+            return shares - (shares % self.config.lot_size)
+        return old_quantity
+
+    def _is_st_stock(self, stock_code: str, stock_name: Optional[str] = None) -> bool:
+        name = stock_name if stock_name is not None else self.reader.latest_stock_name(stock_code)
+        normalized = (name or "").strip().upper()
+        return normalized.startswith("ST") or normalized.startswith("*ST") or " ST" in normalized
 
     def _sell_position(
         self,

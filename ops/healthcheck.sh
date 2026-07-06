@@ -9,6 +9,7 @@ REPORT_DIR="${DSA_DIR}/reports"
 EXPECTED_STOCKS="${EXPECTED_STOCKS:-5}"
 MIN_DAILY_ROWS="${MIN_DAILY_ROWS:-3}"
 MAX_DAILY_ROWS="${MAX_DAILY_ROWS:-7}"
+STOCK_POOL="${STOCK_POOL:-600519 300750 601318 600036 600900}"
 
 default_check_date() {
   if [[ "$(date "+%u")" == "1" ]]; then
@@ -36,6 +37,10 @@ pass() {
 fail() {
   printf "FAIL %s\n" "$*" >&2
   STATUS=1
+}
+
+warn() {
+  printf "WARN %s\n" "$*" >&2
 }
 
 check_report() {
@@ -74,6 +79,36 @@ check_table_count() {
   fi
 }
 
+check_daily_bar_completeness() {
+  local present_codes
+  local missing=""
+  local present_count=0
+
+  if [[ ! -f "${DB_PATH}" ]]; then
+    fail "db_missing path=${DB_PATH}"
+    return
+  fi
+
+  if ! present_codes="$(/usr/bin/sqlite3 -readonly "${DB_PATH}" "select distinct code from stock_daily where date = '${CHECK_DATE}' order by code;")"; then
+    fail "db_query_failed table=stock_daily"
+    return
+  fi
+
+  for code in ${STOCK_POOL}; do
+    if printf "%s\n" "${present_codes}" | /usr/bin/grep -qx "${code}"; then
+      present_count=$((present_count + 1))
+    else
+      missing="${missing}${missing:+,}${code}"
+    fi
+  done
+
+  if (( present_count < EXPECTED_STOCKS )); then
+    warn "stock_daily_incomplete date=${CHECK_DATE} rows=${present_count}/${EXPECTED_STOCKS} missing=${missing}"
+  else
+    pass "stock_daily_complete date=${CHECK_DATE} rows=${present_count}/${EXPECTED_STOCKS}"
+  fi
+}
+
 check_errors() {
   local errors
 
@@ -103,6 +138,7 @@ check_report
 check_table_count "analysis_history" "created_at"
 check_table_count "decision_signals" "created_at"
 check_table_count "llm_usage" "called_at"
+check_daily_bar_completeness
 check_errors
 check_proxy
 

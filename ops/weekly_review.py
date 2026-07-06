@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import sqlite3
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -15,8 +18,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from executor.config import QUANT_DIR, ExecutorConfig
 from executor.ledger import PaperLedger
-from executor.models import FeeModel, SlippageModel
-from executor.rules import round_lot_shares
 from executor.signal_reader import SignalReader, parse_date
 
 
@@ -234,32 +235,149 @@ def _average_holding_days(trades: Sequence[sqlite3.Row]) -> Optional[float]:
 
 
 def load_benchmarks(reader: SignalReader, config: ExecutorConfig, start: date, end: date) -> Dict[str, Any]:
+    equal_weight = _equal_weight_return(reader, config, start, end)
+    hs300_start = parse_date(equal_weight.get("start_date")) if equal_weight.get("available") else None
+    hs300_end = parse_date(equal_weight.get("end_date")) if equal_weight.get("available") else None
     return {
-        "hs300": _hs300_return(reader, config, start, end),
-        "equal_weight": _equal_weight_return(reader, config, start, end),
+        "hs300": _hs300_return(config, hs300_start or start, hs300_end or end),
+        "equal_weight": equal_weight,
     }
 
 
-def _hs300_return(reader: SignalReader, config: ExecutorConfig, start: date, end: date) -> Dict[str, Any]:
+def _hs300_return(config: ExecutorConfig, start: date, end: date) -> Dict[str, Any]:
+    errors = []
     for code in config.benchmark_codes:
-        bars = _bars_between(reader.db_path, code, start, end)
-        if len(bars) >= 2:
-            first = bars[0]
-            last = bars[-1]
-            if first["open"] and last["close"]:
-                return {
-                    "available": True,
-                    "code": code,
-                    "start_date": first["date"],
-                    "end_date": last["date"],
-                    "return": float(last["close"]) / float(first["open"]) - 1.0,
-                    "source": "DSA stock_daily",
-                }
+        secid = _eastmoney_index_secid(code)
+        if secid is not None:
+            try:
+                result = _benchmark_from_bars(
+                    code=code,
+                    bars=_fetch_eastmoney_index_bars(secid, start, end),
+                    source="Eastmoney index kline, gross price return without fees/slippage",
+                )
+                if result is not None:
+                    return result
+            except Exception as exc:
+                errors.append(f"{code}/eastmoney: {type(exc).__name__}: {exc}")
+        symbol = _tencent_index_symbol(code)
+        if symbol is not None:
+            try:
+                result = _benchmark_from_bars(
+                    code=code,
+                    bars=_fetch_tencent_index_bars(symbol, start, end),
+                    source="Tencent index kline, gross price return without fees/slippage",
+                )
+                if result is not None:
+                    return result
+            except Exception as exc:
+                errors.append(f"{code}/tencent: {type(exc).__name__}: {exc}")
     return {
         "available": False,
-        "reason": "No HS300 bars found in DSA stock_daily for configured benchmark codes.",
-        "source": "DSA stock_daily",
+        "reason": "No HS300 bars fetched from external index source." + (f" Errors: {'; '.join(errors[:3])}" if errors else ""),
+        "source": "Eastmoney/Tencent index kline",
     }
+
+
+def _benchmark_from_bars(*, code: str, bars: Sequence[Dict[str, Any]], source: str) -> Optional[Dict[str, Any]]:
+    if len(bars) < 1:
+        return None
+    first = bars[0]
+    last = bars[-1]
+    if first["open"] and last["close"]:
+        return {
+            "available": True,
+            "code": code,
+            "start_date": first["date"],
+            "end_date": last["date"],
+            "return": float(last["close"]) / float(first["open"]) - 1.0,
+            "source": source,
+        }
+    return None
+
+
+def _eastmoney_index_secid(code: str) -> Optional[str]:
+    normalized = (code or "").strip().upper().replace(".", "")
+    if normalized in {"000300", "SH000300", "000300SH"}:
+        return "1.000300"
+    if normalized in {"399300", "SZ399300", "399300SZ"}:
+        return "0.399300"
+    return None
+
+
+def _tencent_index_symbol(code: str) -> Optional[str]:
+    normalized = (code or "").strip().upper().replace(".", "")
+    if normalized in {"000300", "SH000300", "000300SH"}:
+        return "sh000300"
+    if normalized in {"399300", "SZ399300", "399300SZ"}:
+        return "sz399300"
+    return None
+
+
+def _fetch_eastmoney_index_bars(secid: str, start: date, end: date) -> List[Dict[str, Any]]:
+    params = {
+        "secid": secid,
+        "klt": "101",
+        "fqt": "1",
+        "beg": start.strftime("%Y%m%d"),
+        "end": end.strftime("%Y%m%d"),
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+    }
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get?" + urlencode(params)
+    with urlopen(url, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    klines = ((payload.get("data") or {}).get("klines") or [])
+    bars = []
+    for item in klines:
+        parts = str(item).split(",")
+        if len(parts) < 5:
+            continue
+        bars.append(
+            {
+                "date": parts[0],
+                "open": _coerce_float(parts[1]),
+                "close": _coerce_float(parts[2]),
+                "high": _coerce_float(parts[3]),
+                "low": _coerce_float(parts[4]),
+            }
+        )
+    return bars
+
+
+def _fetch_tencent_index_bars(symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
+    params = {
+        "param": f"{symbol},day,{start.isoformat()},{end.isoformat()},30,qfq",
+    }
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?" + urlencode(params)
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*"})
+    with urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    data = payload.get("data") if isinstance(payload, dict) else None
+    item = data.get(symbol) if isinstance(data, dict) else None
+    rows = []
+    if isinstance(item, dict):
+        rows = item.get("qfqday") or item.get("day") or []
+    bars = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 5:
+            continue
+        bars.append(
+            {
+                "date": str(row[0]),
+                "open": _coerce_float(row[1]),
+                "close": _coerce_float(row[2]),
+                "high": _coerce_float(row[3]),
+                "low": _coerce_float(row[4]),
+            }
+        )
+    return bars
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _equal_weight_return(reader: SignalReader, config: ExecutorConfig, start: date, end: date) -> Dict[str, Any]:
@@ -275,12 +393,8 @@ def _equal_weight_return(reader: SignalReader, config: ExecutorConfig, start: da
         }
     start_date = common_dates[0]
     end_date = common_dates[-1]
-    slippage = SlippageModel(config.slippage_rate)
-    fees = FeeModel(config.commission_rate, config.min_commission, config.stamp_tax_rate)
-    cash_per_symbol = config.initial_cash / len(config.stock_pool)
-    leftover = 0.0
-    ending_cash = 0.0
     details = []
+    returns = []
 
     for code in config.stock_pool:
         start_bar = reader.bar(code, start_date)
@@ -291,27 +405,23 @@ def _equal_weight_return(reader: SignalReader, config: ExecutorConfig, start: da
                 "reason": f"Missing bar for {code} on aligned dates.",
                 "source": "DSA stock_daily",
             }
-        buy_price = slippage.execution_price(float(start_bar.open), "buy")
-        shares = round_lot_shares(cash_per_symbol, buy_price, lot_size=config.lot_size)
-        buy_gross = shares * buy_price
-        buy_commission, buy_tax = fees.total_costs(buy_gross, "buy")
-        spent = buy_gross + buy_commission + buy_tax
-        leftover += cash_per_symbol - spent
+        symbol_return = float(end_bar.close) / float(start_bar.open) - 1.0
+        returns.append(symbol_return)
+        details.append(
+            {
+                "code": code,
+                "start_open": float(start_bar.open),
+                "end_close": float(end_bar.close),
+                "return": symbol_return,
+            }
+        )
 
-        sell_price = slippage.execution_price(float(end_bar.close), "sell")
-        sell_gross = shares * sell_price
-        sell_commission, sell_tax = fees.total_costs(sell_gross, "sell")
-        proceeds = sell_gross - sell_commission - sell_tax
-        ending_cash += proceeds
-        details.append({"code": code, "shares": shares, "buy_price": buy_price, "sell_price": sell_price})
-
-    total_end = leftover + ending_cash
     return {
         "available": True,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "return": total_end / config.initial_cash - 1.0,
-        "source": "DSA stock_daily, executor fee/slippage assumptions",
+        "return": sum(returns) / len(returns),
+        "source": "DSA stock_daily, gross price return without fees/slippage",
         "details": details,
     }
 
