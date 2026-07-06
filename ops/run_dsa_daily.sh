@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/yongyuanbuanzhede/Documents/量化系统"
+PROJECT_DIR="/Users/yongyuanbuanzhede/quant"
 DSA_DIR="${PROJECT_DIR}/vendor/daily_stock_analysis"
 LOG_DIR="${PROJECT_DIR}/runtime_data/logs"
 LAUNCHER_LOG="${LOG_DIR}/dsa_daily_launcher.log"

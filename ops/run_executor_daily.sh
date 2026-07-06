@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/yongyuanbuanzhede/Documents/量化系统"
+PROJECT_DIR="/Users/yongyuanbuanzhede/quant"
 LOG_DIR="${PROJECT_DIR}/runtime_data/logs"
 LAUNCHER_LOG="${LOG_DIR}/executor_daily_launcher.log"
 PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"

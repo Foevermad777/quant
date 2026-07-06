@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-PROJECT_DIR="/Users/yongyuanbuanzhede/Documents/量化系统"
+PROJECT_DIR="/Users/yongyuanbuanzhede/quant"
 DSA_DIR="${PROJECT_DIR}/vendor/daily_stock_analysis"
 DB_PATH="${PROJECT_DIR}/runtime_data/dsa/stock_analysis.db"
 LOG_DIR="${PROJECT_DIR}/runtime_data/logs"

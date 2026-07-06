@@ -4,11 +4,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.quant.executor.daily</string>
+  <string>com.quant.dsa.daily</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/yongyuanbuanzhede/quant/ops/run_executor_daily.sh</string>
+    <string>/Users/yongyuanbuanzhede/quant/ops/run_dsa_daily.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -20,41 +20,41 @@
       <key>Weekday</key>
       <integer>1</integer>
       <key>Hour</key>
-      <integer>18</integer>
+      <integer>17</integer>
       <key>Minute</key>
-      <integer>40</integer>
+      <integer>58</integer>
     </dict>
     <dict>
       <key>Weekday</key>
       <integer>2</integer>
       <key>Hour</key>
-      <integer>18</integer>
+      <integer>17</integer>
       <key>Minute</key>
-      <integer>40</integer>
+      <integer>58</integer>
     </dict>
     <dict>
       <key>Weekday</key>
       <integer>3</integer>
       <key>Hour</key>
-      <integer>18</integer>
+      <integer>17</integer>
       <key>Minute</key>
-      <integer>40</integer>
+      <integer>58</integer>
     </dict>
     <dict>
       <key>Weekday</key>
       <integer>4</integer>
       <key>Hour</key>
-      <integer>18</integer>
+      <integer>17</integer>
       <key>Minute</key>
-      <integer>40</integer>
+      <integer>58</integer>
     </dict>
     <dict>
       <key>Weekday</key>
       <integer>5</integer>
       <key>Hour</key>
-      <integer>18</integer>
+      <integer>17</integer>
       <key>Minute</key>
-      <integer>40</integer>
+      <integer>58</integer>
     </dict>
   </array>
 
@@ -62,9 +62,9 @@
   <false/>
 
   <key>StandardOutPath</key>
-  <string>/Users/yongyuanbuanzhede/quant/runtime_data/logs/executor_daily_launchd.out.log</string>
+  <string>/Users/yongyuanbuanzhede/quant/runtime_data/logs/dsa_daily_launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/yongyuanbuanzhede/quant/runtime_data/logs/executor_daily_launchd.err.log</string>
+  <string>/Users/yongyuanbuanzhede/quant/runtime_data/logs/dsa_daily_launchd.err.log</string>
 </dict>
 </plist>
