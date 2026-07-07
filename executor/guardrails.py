@@ -92,28 +92,23 @@ def _degrade_confidence(confidence: Optional[float], penalty: float) -> Optional
 
 def _has_source_attribution(payload: Mapping[str, Any]) -> bool:
     direct_keys = ("sources", "citations", "data_sources", "source_attribution")
-    if any(_non_empty(payload.get(key)) for key in direct_keys):
+    if any(_has_dated_source_item(payload.get(key)) for key in direct_keys):
         return True
 
     evidence = payload.get("evidence") or payload.get("evidence_json")
     if isinstance(evidence, Mapping):
         evidence = evidence.get("items") or evidence.get("sources") or evidence.get("news")
-    if isinstance(evidence, list):
-        for item in evidence:
-            if isinstance(item, Mapping) and any(
-                _non_empty(item.get(key)) for key in ("source", "url", "published_date", "published_at")
-            ):
-                return True
-    return False
+    return _has_dated_source_item(evidence)
 
 
 def _has_invalid_conditions(payload: Mapping[str, Any]) -> bool:
-    candidates = (
-        payload.get("invalid_conditions"),
-        payload.get("invalidation"),
-        payload.get("invalidations"),
-    )
-    return any(_non_empty(candidate) for candidate in candidates)
+    invalid_conditions = payload.get("invalid_conditions")
+    if isinstance(invalid_conditions, list):
+        return any(_has_structured_invalid_condition(item) for item in invalid_conditions)
+    invalidations = payload.get("invalidations")
+    if isinstance(invalidations, list):
+        return any(_has_structured_invalid_condition(item) for item in invalidations)
+    return False
 
 
 def _has_base_bull_bear(payload: Mapping[str, Any]) -> bool:
@@ -139,3 +134,22 @@ def _non_empty(value: Any) -> bool:
     if isinstance(value, (list, tuple, set, dict)):
         return bool(value)
     return True
+
+
+def _has_dated_source_item(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        date_value = value.get("published_date") or value.get("published_at") or value.get("date")
+        source_value = value.get("source") or value.get("url") or value.get("claim")
+        return _non_empty(date_value) and _non_empty(source_value)
+    if isinstance(value, list):
+        return any(_has_dated_source_item(item) for item in value)
+    return False
+
+
+def _has_structured_invalid_condition(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    condition = value.get("condition")
+    trigger = value.get("trigger_price_or_data")
+    condition_type = str(value.get("type") or "").strip().lower()
+    return _non_empty(condition) and _non_empty(trigger) and condition_type in {"price", "data", "event"}

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 FILL_MODEL_NEXT_OPEN = "next_open"
@@ -9,14 +10,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = PROJECT_ROOT / "runtime_data"
 QUANT_DIR = RUNTIME_DIR / "quant"
 ACCEPTANCE_DIR = RUNTIME_DIR / "acceptance"
+SECRETS_DIR = RUNTIME_DIR / "secrets"
 DSA_DB_PATH = RUNTIME_DIR / "dsa" / "stock_analysis.db"
 PAPER_DB_PATH = QUANT_DIR / "paper.db"
+GEMINI_API_KEY_PATH = SECRETS_DIR / "gemini_api_key.txt"
+DISCIPLINE_SKILL_PATH = PROJECT_ROOT / "dsa_skills" / "discipline.yaml"
+G5_DEFAULT_MODEL = "gemini-3-flash-preview"
+G5_COMPLETION_VERSION = "g5-minimal-v0.1"
+G5_SCHEMA_VERSION = "g5-discipline-v0.1"
 
 
 @dataclass(frozen=True)
 class ExecutorConfig:
     dsa_db_path: Path = DSA_DB_PATH
     ledger_db_path: Path = PAPER_DB_PATH
+    disciplined_db_path: Optional[Path] = None
+    use_disciplined_signals: bool = True
     initial_cash: float = 1_000_000.0
     per_signal_cash: float = 100_000.0
     symbol_cap_rate: float = 0.20

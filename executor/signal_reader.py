@@ -94,14 +94,42 @@ EXIT_ACTIONS = {"sell", "reduce", "avoid"}
 
 
 class SignalReader:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        disciplined_db_path: Optional[Path] = None,
+        *,
+        use_disciplined_signals: bool = True,
+    ) -> None:
         self.db_path = Path(db_path)
+        self.disciplined_db_path = Path(disciplined_db_path) if disciplined_db_path is not None else None
+        self.use_disciplined_signals = use_disciplined_signals
 
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self.db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect_disciplined(self) -> sqlite3.Connection:
+        if self.disciplined_db_path is None:
+            raise FileNotFoundError("disciplined signal store is not configured")
+        uri = f"file:{self.disciplined_db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def has_disciplined_signal_store(self) -> bool:
+        if not self.use_disciplined_signals or self.disciplined_db_path is None or not self.disciplined_db_path.exists():
+            return False
+        try:
+            with self._connect_disciplined() as conn:
+                row = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = 'disciplined_signals'"
+                ).fetchone()
+        except sqlite3.Error:
+            return False
+        return row is not None
 
     def analysis_count_on(self, day: date) -> int:
         with self._connect() as conn:
@@ -119,6 +147,21 @@ class SignalReader:
         return self._row_to_signal(row)
 
     def active_signals_before(self, execution_date: date) -> List[DecisionSignal]:
+        if self.has_disciplined_signal_store():
+            with self._connect_disciplined() as conn:
+                rows = conn.execute(
+                    """
+                    select *
+                    from disciplined_signals
+                    where status = 'active'
+                      and gate_accepted = 1
+                      and date(created_at) < ?
+                    order by datetime(created_at), source_signal_id
+                    """,
+                    (execution_date.isoformat(),),
+                ).fetchall()
+            return [self._row_to_disciplined_signal(row) for row in rows]
+
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -345,6 +388,39 @@ class SignalReader:
             market=row["market"] or "cn",
             source_type=row["source_type"] or "analysis",
             source_agent=row["source_agent"],
+            plan_quality=row["plan_quality"],
+        )
+
+    @staticmethod
+    def _row_to_disciplined_signal(row: sqlite3.Row) -> DecisionSignal:
+        metadata = _loads_json(row["completion_payload_json"])
+        metadata["discipline"] = {
+            "schema_version": row["schema_version"],
+            "completion_version": row["completion_version"],
+            "model": row["model"],
+            "completed_at": row["completed_at"],
+            "source_signal_id": row["source_signal_id"],
+            "gate_action": row["gate_action"],
+            "gate_reasons": json.loads(row["gate_reasons_json"] or "[]"),
+        }
+        return DecisionSignal(
+            id=int(row["source_signal_id"]),
+            stock_code=row["stock_code"],
+            stock_name=row["stock_name"],
+            action=(row["action"] or "").strip().lower(),
+            confidence=row["confidence"],
+            entry_high=row["entry_high"],
+            entry_low=row["entry_low"],
+            stop_loss=row["stop_loss"],
+            target_price=row["target_price"],
+            status=row["status"],
+            created_at=parse_datetime(row["created_at"]),
+            expires_at=parse_datetime(row["expires_at"]),
+            source_report_id=row["source_report_id"],
+            metadata=metadata,
+            market=row["market"] or "cn",
+            source_type="disciplined_signal",
+            source_agent="g5_completion",
             plan_quality=row["plan_quality"],
         )
 

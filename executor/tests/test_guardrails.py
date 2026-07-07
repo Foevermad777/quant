@@ -14,7 +14,9 @@ def _valid_payload() -> dict:
         "action": "watch",
         "confidence": 0.72,
         "sources": [{"source": "fixture", "published_date": "2026-07-06"}],
-        "invalid_conditions": ["跌破 1180 且无法收回"],
+        "invalid_conditions": [
+            {"condition": "跌破 1180 且无法收回", "trigger_price_or_data": "1180", "type": "price"}
+        ],
         "scenarios": {
             "base": {"probability": 0.55, "summary": "震荡整理"},
             "bull": {"probability": 0.25, "summary": "放量收复均线"},
@@ -41,9 +43,27 @@ class GuardrailTests(unittest.TestCase):
         self.assertIn(MISSING_SOURCE_ATTRIBUTION, result.gate_reasons)
         self.assertEqual(result.signal["guardrail"]["action"], "reject")
 
+    def test_undated_source_attribution_rejects(self) -> None:
+        payload = _valid_payload()
+        payload["sources"] = [{"source": "agent:gemini"}]
+
+        result = gate_dsa_output(payload)
+
+        self.assertFalse(result.accepted)
+        self.assertIn(MISSING_SOURCE_ATTRIBUTION, result.gate_reasons)
+
     def test_missing_invalid_conditions_rejects(self) -> None:
         payload = _valid_payload()
         payload.pop("invalid_conditions")
+
+        result = gate_dsa_output(payload)
+
+        self.assertFalse(result.accepted)
+        self.assertIn(MISSING_INVALID_CONDITIONS, result.gate_reasons)
+
+    def test_free_text_invalidation_rejects(self) -> None:
+        payload = _valid_payload()
+        payload["invalid_conditions"] = ["跌破 1180 且无法收回"]
 
         result = gate_dsa_output(payload)
 

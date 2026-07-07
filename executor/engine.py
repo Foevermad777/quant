@@ -54,7 +54,12 @@ def _build_fill_model(name: str) -> object:
 class PaperEngine:
     def __init__(self, config: Optional[ExecutorConfig] = None) -> None:
         self.config = config or ExecutorConfig()
-        self.reader = SignalReader(self.config.dsa_db_path)
+        disciplined_db_path = self.config.disciplined_db_path or self.config.ledger_db_path
+        self.reader = SignalReader(
+            self.config.dsa_db_path,
+            disciplined_db_path,
+            use_disciplined_signals=self.config.use_disciplined_signals,
+        )
         self.ledger = PaperLedger(self.config.ledger_db_path, config=self.config)
         self.fill_model = _build_fill_model(self.config.fill_model)
         self.slippage = SlippageModel(self.config.slippage_rate)
