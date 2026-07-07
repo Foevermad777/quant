@@ -280,6 +280,18 @@ class PaperLedger:
             )
             return cursor.rowcount == 1
 
+    def delete_events(self, *, event_date: date, event_type: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                delete from signal_events
+                where event_date = ?
+                  and event_type = ?
+                """,
+                (event_date.isoformat(), event_type),
+            )
+            return cursor.rowcount
+
     def record_pending_exit(
         self,
         *,

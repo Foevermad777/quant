@@ -18,7 +18,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from executor.config import QUANT_DIR, ExecutorConfig
 from executor.ledger import PaperLedger
-from executor.signal_reader import SignalReader, parse_date
+from executor.signal_reader import SignalReader, parse_date, parse_datetime
+from executor.time_guard import NewsTimingAudit, bar_available_at, classify_news_for_attribution
 
 
 def profit_loss_ratio(pnls: Sequence[float]) -> Optional[float]:
@@ -206,6 +207,65 @@ def load_ledger_gaps(ledger: PaperLedger, start: date, end: date) -> List[sqlite
             (start.isoformat(), end.isoformat()),
         ).fetchall()
     return rows
+
+
+def load_news_timing_audit(reader: SignalReader, start: date, end: date) -> List[NewsTimingAudit]:
+    with _connect_ro(reader.db_path) as conn:
+        table = conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'news_intel'"
+        ).fetchone()
+        if table is None:
+            return []
+        rows = conn.execute(
+            """
+            select s.id as signal_id,
+                   s.stock_code,
+                   s.created_at as decision_timestamp,
+                   o.horizon,
+                   o.anchor_date,
+                   n.title,
+                   n.source,
+                   n.published_date
+            from decision_signal_outcomes o
+            join decision_signals s on s.id = o.signal_id
+            join news_intel n on n.code = s.stock_code
+                            and date(n.published_date) = date(o.anchor_date)
+            where date(coalesce(o.updated_at, o.created_at)) between ? and ?
+              and o.anchor_date is not null
+              and o.eval_status = 'completed'
+            order by date(o.anchor_date), s.stock_code, datetime(n.published_date), n.id
+            """,
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+
+    audits: List[NewsTimingAudit] = []
+    for row in rows:
+        anchor_date = parse_date(row["anchor_date"])
+        if anchor_date is None:
+            continue
+        decision_timestamp = parse_datetime(row["decision_timestamp"])
+        published_at = parse_datetime(row["published_date"])
+        status, reason = classify_news_for_attribution(
+            published_at=published_at,
+            decision_timestamp=decision_timestamp,
+            anchor_date=anchor_date,
+        )
+        audits.append(
+            NewsTimingAudit(
+                signal_id=int(row["signal_id"]),
+                stock_code=str(row["stock_code"]),
+                horizon=str(row["horizon"]),
+                anchor_date=anchor_date,
+                decision_timestamp=decision_timestamp,
+                bar_available_at=bar_available_at(anchor_date),
+                news_title=str(row["title"] or ""),
+                news_published_at=published_at,
+                news_source=row["source"],
+                attribution_status=status,
+                reason=reason,
+            )
+        )
+    return audits
 
 
 def _snapshot_returns(values: Sequence[float]) -> List[float]:
@@ -469,6 +529,7 @@ def render_report(
     paper_stats: Dict[str, Any],
     benchmarks: Dict[str, Any],
     data_gaps: Sequence[sqlite3.Row],
+    news_timing_audit: Sequence[NewsTimingAudit],
 ) -> str:
     ci = bootstrap_mean_ci(paper_stats["returns"])
     reflections = closed_signal_reflections(paper_stats, benchmarks)
@@ -513,6 +574,10 @@ def render_report(
         "## 延迟回填反思",
         "",
         _render_reflections(reflections),
+        "",
+        "## 时点校验",
+        "",
+        _render_news_timing_audit(news_timing_audit),
         "",
         "## 数据缺口",
         "",
@@ -584,6 +649,32 @@ def _render_reflections(reflections: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_dt(value: Optional[datetime]) -> str:
+    if value is None:
+        return "N/A"
+    return value.isoformat(sep=" ", timespec="minutes")
+
+
+def _render_news_timing_audit(rows: Sequence[NewsTimingAudit]) -> str:
+    if not rows:
+        return "- No same-anchor-day news timing evidence to audit in range."
+    lines = [
+        "| signal_id | code | horizon | anchor_date | decision_timestamp | bar_available_at | news_published_at | attribution_status | reason | title |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in rows[:20]:
+        title = row.news_title.replace("|", "/")[:80]
+        lines.append(
+            "| "
+            f"{row.signal_id} | {row.stock_code} | {row.horizon} | {row.anchor_date.isoformat()} | "
+            f"{_fmt_dt(row.decision_timestamp)} | {_fmt_dt(row.bar_available_at)} | "
+            f"{_fmt_dt(row.news_published_at)} | {row.attribution_status} | {row.reason} | {title} |"
+        )
+    if len(rows) > 20:
+        lines.append(f"- Additional rows omitted: {len(rows) - 20}")
+    return "\n".join(lines)
+
+
 def _render_data_gaps(rows: Sequence[sqlite3.Row]) -> str:
     if not rows:
         return "- No executor data gaps recorded in range."
@@ -602,6 +693,7 @@ def build_report(start: date, end: date, config: Optional[ExecutorConfig] = None
     paper_stats = load_paper_stats(ledger, start, end)
     benchmarks = load_benchmarks(reader, config, start, end)
     data_gaps = load_ledger_gaps(ledger, start, end)
+    news_timing_audit = load_news_timing_audit(reader, start, end)
     return render_report(
         start=start,
         end=end,
@@ -609,6 +701,7 @@ def build_report(start: date, end: date, config: Optional[ExecutorConfig] = None
         paper_stats=paper_stats,
         benchmarks=benchmarks,
         data_gaps=data_gaps,
+        news_timing_audit=news_timing_audit,
     )
 
 

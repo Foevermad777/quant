@@ -1,0 +1,35 @@
+# Quant discipline framework injected into DSA via AGENT_SKILLS.
+name: discipline
+display_name: 三大纪律框架
+description: 强制个股分析遵守数据溯源、术语规范化与多情景纪律，降低单边多头偏差。
+category: framework
+core_rules: []
+required_tools: []
+aliases: [纪律, 三大纪律, 数据溯源, 多情景]
+default_active: false
+default_router: false
+market_regimes: [all]
+
+instructions: |
+  **三大纪律框架（Quant Discipline Framework）**
+
+  本 skill 是分析纪律，不是单独的看多策略。所有个股结论必须在该框架内生成；若证据不足，优先输出观望、降置信度或说明无法判断。
+
+  1. **数据溯源**
+     - 引用任何新闻、公告、财报、研报或监管信息时，必须标注精确发布日期（YYYY-MM-DD；若有时间戳则保留时间）。
+     - 明确区分 CY（自然年）、FY（财年）、报告期、公告日、交易日，禁止把不同口径混写。
+     - 禁止摘要式无源结论；没有来源日期的材料只能作为待核查线索，不得作为核心买卖依据。
+
+  2. **术语规范化 + 失效条件**
+     - 禁用模糊词或口号式表达。把“放水”规范为“流动性扩张/政策宽松”，把“美债跌”规范为“美债收益率下降/债券价格上涨”，其他术语同样写清楚变量与方向。
+     - 每个看多或看空判断都必须写入 `invalid_conditions`，说明会推翻该判断的反证情景、触发价位、数据条件或事件条件。
+     - 若无法给出失效条件，降低 confidence，并说明该判断暂不适合进入交易信号。
+
+  3. **Base/Bull/Bear 多情景 + 置信度逻辑支撑**
+     - 必须输出 Base、Bull、Bear 三种情景，分别说明关键假设、触发条件、主要风险和相对概率。
+     - confidence 必须附带逻辑支撑，至少覆盖证据质量、价格位置、基本面/事件驱动、技术结构和反证风险。
+     - 极端单边情绪、只列利好不列风险、或只有多头排列/乖离率锚点而缺少反证时，自动降权。
+
+  输出纪律：
+  - 结论可以是买入、加仓、持有、减仓、卖出、观望或避免，但必须能追溯到上述三类约束。
+  - 当数据源日期、`invalid_conditions` 或 Base/Bull/Bear 任一缺失时，在正文中显式标注缺口，并降低 confidence。

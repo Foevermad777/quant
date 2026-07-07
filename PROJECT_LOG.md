@@ -8,7 +8,10 @@
 - **项目根已迁移**：`~/quant`（原 `~/Documents/量化系统` 因 macOS TCC 阻塞 launchd 而废弃，待 CEO 确认后删）。所有路径、排程、git、验收均以 `~/quant` 为准。
 - **阶段**：Phase 1 MVP。M0-M6 已验收；M7（执行器）/M8（周复盘）已实现并"有条件通过"（R1 已解决，R2/R3/R4 待整改）；迁移已验收通过。
 - **自动化链已通**：迁移后 kickstart 完成首次完整端到端跑（DSA 抓数+Bocha 新闻+诊股+信号入库+执行器处理），launchd 两任务 exit 0。14 天基线积累底座就绪。
-- **待办（Codex）**：见 `REWORK_CHECKLIST.md` 单一权威清单——P0 relocation 提交 → R4 归因 → R2 平仓 → R3 沪深300 基线 → R4 余项(测试/ST/NULL) → D1 缺口补抓 → D2 晨检告警 → D3 Tushare(待 CEO 定) → 执行器 backfill。
+- **返工已验收通过**（`runtime_data/acceptance/REWORK_CLAUDE_VERDICT.md`）：P0/R2/R3/R4/D1/D2 全部完成（28 测试过），Tushare 已注册+Claude 接入 DSA .env（token 实测有效且能取到免费源缺的茅台/宁德 07-06 日线）。**剩收尾三步（交 Codex）**：①kickstart DSA 验证 Tushare 生效、07-06 补 5/5；②重跑 D1 确认无 remaining；③执行器 `--backfill-from 2026-07-06` 对齐台账。
+- **OpenClaw 红队已响应**（`runtime_data/acceptance/RED_TEAM_RESPONSE_20260706.md`，技术结论经代码核查）：接受 Q1 成交偏差(改次日开盘价+双倍滑点，代码已证实 entry_high 幸存者偏差)、Q2 复盘改定性打脸、警告2 防未来函数护栏、警告3 OOS 红线；纪律注入找到不踩红线的两步解法(Path A 配置级软注入清空 bull-only 基线本周可做 / Path B 我方 executor 包裹层做 guardrail 强制)。**待 CEO 拍板 2 项**：①Q3 Phase2 标的池是否改中证500/1000(验证期留沪深300)；②是否本周优先做 Path A 纪律注入+Q1 成交改造。当前 14 天运行**重定义为工程压测**，信号质量基线待 Path A+Q1 落地后起算。
+- **G1-G4 已实现并验收通过**（`runtime_data/acceptance/G1_G4_CLAUDE_VERDICT.md`）：G1 成交改 next_open+开仓双滑点(旧模型留A/B)、G2 三大纪律注入(Claude 金丝雀验证:bull-only 基线真被清空、纪律真进 prompt，零API花费)、G3 防未来函数护栏、G4 包裹层硬门控。**待收尾**：Codex 提交 G1-G4(全未 commit)；G2 的 LLM 合规性与 G1 真实偏差幅度待第一次真实基线跑观察(建议即作 Day 1)。
+- **美股平行赛道计划已出**（`US_TRACK_PLAN.md`，CEO 已同意方向）：独立规则模块(T+0/无涨跌停/NYSE日历)+独立台账 paper_us.db+北京清晨调度+Tavily英文新闻+社媒情绪，复用三大纪律。**排在 G1/G2 提交与 A 股首基线跑之后启动**。待 CEO 提供美股股池(~5只)、账户金额、数据key。
 - **CEO 待办**：`sudo pmset repeat wakeorpoweron MTWRF 17:57:00`（合盖保险，非阻塞）；确认新根稳定一天后删旧根。
 - **日常运行须知**：跑批时段机器插电+开盖（锁屏无妨）；本地代理 127.0.0.1:7890 必须在线。
 
@@ -27,7 +30,10 @@
 | 决策 | 结论 | 出处 |
 |---|---|---|
 | 总架构 | DSA 当后端服务（数据/信号库/推送），自研薄层（筛选器/诊股纪律层/执行器/复盘），外挂不深 fork | DSA_RESEARCH_SUMMARY |
-| 标的池 | Phase 1 锁死 5 只沪深300（600519/300750/601318/600036/600900），积累期不换池 | PRD + 会话 07-06 |
+| 标的池 | 验证期锁死 5 只沪深300（600519/300750/601318/600036/600900）不换池；**Alpha 期(Phase 2)改中证500/1000**（不碰微盘：冲击成本/操纵/无人肉直觉），CEO 已拍板 07-06 | PRD + 红队响应 |
+| 成交模型 | **次日开盘价成交 + 开仓双倍滑点 + 全额摩擦（地狱模式）**；旧 entry_high 限价模型留开关做 A/B 量化幸存者偏差。（原限价=entry_high 被红队证伪:赢家踏空/输家接飞刀） | RED_TEAM_RESPONSE / G1 |
+| 纪律注入 | Path A 配置级软注入(discipline.yaml 清空 DSA bull-only 基线,本周) + Path B 我方 executor 包裹层做 guardrail 硬强制(不改 DSA 源码) | RED_TEAM_RESPONSE / G2+G4 |
+| 复盘口径 | 首次复盘以**定性"验尸打脸"为主**(旧闻当新利好/看图说话/逻辑自洽但市场不认),PnL 是 10 日噪音明确降级;**样本外 OOS 刻入红线** | 红队 Q2/警告3 |
 | 信号消费口径 | 以护栏后 advice 层为准；decision_signals.action 与其冲突则跳过（S1）；同股取最新（S5）；时间 UTC 基准（S6） | M4 验收 |
 | LLM | Gemini flash（免费额度内），走本地代理；新闻搜索 Bocha 主源 + Tavily 备源 | M4-fix / M4.5 |
 | 环境纪律 | uv 独立 Python，一切依赖进项目 venv，全局零污染；DSA 库对自研代码只读 | M0-fix / M7 计划 |

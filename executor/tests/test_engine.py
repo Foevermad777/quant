@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 
-from executor.config import ExecutorConfig
+from executor.config import FILL_MODEL_LIMIT_ENTRY_HIGH, ExecutorConfig
 from executor.engine import PaperEngine
 from executor.ledger import PaperLedger, TradeFill
 
@@ -149,6 +149,16 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(events[1]["reason"], "missing_stock_daily_bars_for_pool")
             self.assertIn("600519", events[1]["details_json"])
 
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_bar(conn, "600519", "2026-07-06", 10.0, 10.5)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["data_gaps"], 0)
+            with engine.ledger._connect() as conn:
+                events = conn.execute("select event_type from signal_events order by id").fetchall()
+            self.assertEqual([row["event_type"] for row in events], ["s1_conflict_skip"])
+
     def _run_exit_signal(self, action: str, advice: str) -> tuple[dict, sqlite3.Row]:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -241,6 +251,75 @@ class EngineTests(unittest.TestCase):
             position_after_exit = engine.ledger.position("600519")
             self.assertEqual(second_day["sells"], 1)
             self.assertEqual(position_after_exit["quantity"], 0)
+
+    def test_default_open_fill_uses_next_open_and_double_buy_slippage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600519", "买入", "2026-07-05 12:00:00")
+                _insert_analysis(conn, 2, "600519", "买入", "2026-07-06 12:00:00")
+                _insert_signal(conn, 1, "600519", "buy", 1, entry_high=10.0)
+                _insert_bar(conn, "600519", "2026-07-06", 10.5, 10.8)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600519",),
+                commission_rate=0.0,
+                min_commission=0.0,
+                stamp_tax_rate=0.0,
+                slippage_rate=0.001,
+                per_signal_cash=10_000.0,
+            )
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["filled"], 1)
+            with engine.ledger._connect() as conn:
+                trade = conn.execute("select fill_price, exec_price, reason from trades").fetchone()
+            self.assertEqual(trade["fill_price"], 10.5)
+            self.assertEqual(trade["exec_price"], 10.521)
+            self.assertEqual(trade["reason"], "next_day_open")
+
+    def test_limit_entry_high_fill_model_remains_available_for_ab_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600519", "买入", "2026-07-05 12:00:00")
+                _insert_analysis(conn, 2, "600519", "买入", "2026-07-06 12:00:00")
+                _insert_signal(conn, 1, "600519", "buy", 1, entry_high=10.0)
+                _insert_bar(conn, "600519", "2026-07-06", 10.5, 10.2)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600519",),
+                fill_model=FILL_MODEL_LIMIT_ENTRY_HIGH,
+                commission_rate=0.0,
+                min_commission=0.0,
+                stamp_tax_rate=0.0,
+                slippage_rate=0.0,
+            )
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["filled"], 0)
+            self.assertEqual(stats["unfilled"], 1)
+            with engine.ledger._connect() as conn:
+                attempt = conn.execute(
+                    "select status, reason, price from order_attempts where stock_code = '600519'"
+                ).fetchone()
+                trades = conn.execute("select count(*) as count from trades").fetchone()
+            self.assertEqual(attempt["status"], "unfilled")
+            self.assertEqual(attempt["reason"], "limit_not_touched")
+            self.assertIsNone(attempt["price"])
+            self.assertEqual(trades["count"], 0)
 
 
 if __name__ == "__main__":

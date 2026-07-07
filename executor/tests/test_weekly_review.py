@@ -7,11 +7,13 @@ from unittest.mock import patch
 
 from executor.config import ExecutorConfig
 from executor.signal_reader import SignalReader
+from executor.time_guard import classify_news_for_attribution
 from ops.weekly_review import (
     _equal_weight_return,
     _hs300_return,
     bootstrap_mean_ci,
     expectancy,
+    load_news_timing_audit,
     max_drawdown,
     profit_loss_ratio,
 )
@@ -98,6 +100,71 @@ class WeeklyReviewMetricTests(unittest.TestCase):
         self.assertTrue(benchmark["available"])
         self.assertEqual(benchmark["source"], "Tencent index kline, gross price return without fees/slippage")
         self.assertAlmostEqual(benchmark["return"], -0.01)
+
+    def test_news_timing_audit_excludes_post_bar_news_from_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "dsa.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    create table decision_signals (
+                        id integer primary key,
+                        stock_code text not null,
+                        created_at text
+                    );
+                    create table decision_signal_outcomes (
+                        id integer primary key,
+                        signal_id integer not null,
+                        horizon text not null,
+                        eval_status text not null,
+                        anchor_date text,
+                        created_at text,
+                        updated_at text
+                    );
+                    create table news_intel (
+                        id integer primary key,
+                        code text not null,
+                        title text not null,
+                        source text,
+                        published_date text
+                    );
+                    """
+                )
+                conn.execute(
+                    "insert into decision_signals(id, stock_code, created_at) values (1, '600519', '2026-07-05 12:00:00')"
+                )
+                conn.execute(
+                    """
+                    insert into decision_signal_outcomes(
+                        id, signal_id, horizon, eval_status, anchor_date, created_at, updated_at
+                    ) values (1, 1, 'T+1', 'completed', '2026-07-06', '2026-07-06 16:00:00', '2026-07-06 16:00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    insert into news_intel(id, code, title, source, published_date)
+                    values (1, '600519', '盘后发布的新闻', 'fixture', '2026-07-06 15:30:00')
+                    """
+                )
+            reader = SignalReader(db_path)
+
+            rows = load_news_timing_audit(reader, date(2026, 7, 6), date(2026, 7, 6))
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].attribution_status, "excluded_after_bar_available")
+            self.assertEqual(rows[0].reason, "published_after_predicted_bar_available")
+            self.assertEqual(rows[0].decision_timestamp.isoformat(sep=" "), "2026-07-05 12:00:00")
+
+    def test_news_after_decision_is_not_available_at_decision(self) -> None:
+        from datetime import datetime
+
+        status, reason = classify_news_for_attribution(
+            published_at=datetime(2026, 7, 6, 10, 0, 0),
+            decision_timestamp=datetime(2026, 7, 5, 12, 0, 0),
+            anchor_date=date(2026, 7, 6),
+        )
+
+        self.assertEqual((status, reason), ("not_available_at_decision", "published_after_decision_timestamp"))
 
 
 if __name__ == "__main__":

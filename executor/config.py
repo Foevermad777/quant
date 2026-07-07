@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+FILL_MODEL_NEXT_OPEN = "next_open"
+FILL_MODEL_LIMIT_ENTRY_HIGH = "limit_entry_high"
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = PROJECT_ROOT / "runtime_data"
 QUANT_DIR = RUNTIME_DIR / "quant"
@@ -18,7 +21,9 @@ class ExecutorConfig:
     per_signal_cash: float = 100_000.0
     symbol_cap_rate: float = 0.20
     lot_size: int = 100
+    fill_model: str = FILL_MODEL_NEXT_OPEN
     slippage_rate: float = 0.001
+    open_slippage_multiplier: float = 2.0
     commission_rate: float = 0.00025
     min_commission: float = 5.0
     stamp_tax_rate: float = 0.0005

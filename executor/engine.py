@@ -7,9 +7,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
-from executor.config import QUANT_DIR, ExecutorConfig
+from executor.config import FILL_MODEL_LIMIT_ENTRY_HIGH, FILL_MODEL_NEXT_OPEN, QUANT_DIR, ExecutorConfig
 from executor.ledger import PaperLedger, TradeFill
-from executor.models import DecisionSignal, FeeModel, LimitFillModel, SlippageModel
+from executor.models import DecisionSignal, FeeModel, LimitFillModel, NextOpenFillModel, SlippageModel
 from executor.rules import (
     cap_order_shares,
     first_exit_trigger,
@@ -43,12 +43,20 @@ def md5_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _build_fill_model(name: str) -> object:
+    if name == FILL_MODEL_NEXT_OPEN:
+        return NextOpenFillModel()
+    if name == FILL_MODEL_LIMIT_ENTRY_HIGH:
+        return LimitFillModel()
+    raise ValueError(f"unsupported fill_model: {name}")
+
+
 class PaperEngine:
     def __init__(self, config: Optional[ExecutorConfig] = None) -> None:
         self.config = config or ExecutorConfig()
         self.reader = SignalReader(self.config.dsa_db_path)
         self.ledger = PaperLedger(self.config.ledger_db_path, config=self.config)
-        self.fill_model = LimitFillModel()
+        self.fill_model = _build_fill_model(self.config.fill_model)
         self.slippage = SlippageModel(self.config.slippage_rate)
         self.fees = FeeModel(
             commission_rate=self.config.commission_rate,
@@ -190,7 +198,11 @@ class PaperEngine:
                 stats["unfilled"] += 1
                 continue
 
-            exec_price = self.slippage.execution_price(fill.price, "buy")
+            exec_price = self.slippage.execution_price(
+                fill.price,
+                "buy",
+                multiplier=self.config.open_slippage_multiplier,
+            )
             portfolio_value = self._portfolio_value(bars)
             current_value = self._current_symbol_value(signal.stock_code, bars)
             shares = cap_order_shares(
@@ -256,6 +268,7 @@ class PaperEngine:
         available = sorted(code for code in self.config.stock_pool if code in bars)
         missing = sorted(code for code in self.config.stock_pool if code not in bars)
         if not missing:
+            self.ledger.delete_events(event_date=execution_date, event_type="data_gap")
             return
         reason = "no_stock_daily_bars_for_execution_date" if not bars else "missing_stock_daily_bars_for_pool"
         if self.ledger.record_event(

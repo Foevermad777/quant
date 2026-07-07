@@ -49,6 +49,22 @@ class FillResult:
     trade_date: Optional[date] = None
 
 
+class NextOpenFillModel:
+    """Fill entry orders at the next available open without entry_high gating."""
+
+    def buy_fill(self, signal: DecisionSignal, bar: Optional[DailyBar]) -> FillResult:
+        if bar is None:
+            return FillResult(False, "unfilled", "suspended")
+        if bar.open is None or bar.open <= 0:
+            return FillResult(False, "unfilled", "missing_open", trade_date=bar.date)
+        return FillResult(True, "filled", "next_day_open", price=float(bar.open), trade_date=bar.date)
+
+    def expired_unfilled(self, signal: DecisionSignal, current_date: date) -> FillResult:
+        if signal.expires_at is not None and current_date > signal.expires_at.date():
+            return FillResult(False, "blocked", "open_unavailable_expired", trade_date=current_date)
+        return FillResult(False, "unfilled", "not_expired", trade_date=current_date)
+
+
 class LimitFillModel:
     """Daily-bar approximation of an A-share limit buy order.
 
@@ -83,11 +99,12 @@ class LimitFillModel:
 class SlippageModel:
     rate: float = 0.001
 
-    def execution_price(self, fill_price: float, side: str) -> float:
+    def execution_price(self, fill_price: float, side: str, *, multiplier: float = 1.0) -> float:
+        effective_rate = self.rate * multiplier
         if side == "buy":
-            return round(fill_price * (1 + self.rate), 6)
+            return round(fill_price * (1 + effective_rate), 6)
         if side == "sell":
-            return round(fill_price * (1 - self.rate), 6)
+            return round(fill_price * (1 - effective_rate), 6)
         raise ValueError(f"unsupported side: {side}")
 
 
