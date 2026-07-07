@@ -7,7 +7,7 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -146,6 +146,8 @@ class CompletionSummary:
     gate_reasons: tuple[str, ...]
     model: str
     latency_ms: Optional[int]
+    attempts: int = 1
+    error: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +159,8 @@ class CompletionSummary:
             "gate_reasons": list(self.gate_reasons),
             "model": self.model,
             "latency_ms": self.latency_ms,
+            "attempts": self.attempts,
+            "error": self.error,
         }
 
 
@@ -188,6 +192,11 @@ class DsaSignalContextLoader:
                 params,
             ).fetchall()
         return [int(row["id"]) for row in rows]
+
+    def stock_code_for_signal(self, signal_id: int) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("select stock_code from decision_signals where id = ?", (signal_id,)).fetchone()
+        return str(row["stock_code"]) if row is not None else None
 
     def load(self, signal_id: int) -> CompletionContext:
         with self._connect() as conn:
@@ -508,6 +517,7 @@ class DisciplineCompleter:
                 gate_reasons=tuple(json.loads(existing["gate_reasons_json"] or "[]")),
                 model=existing["model"],
                 latency_ms=existing["latency_ms"],
+                attempts=0,
             )
 
         context = self.loader.load(source_signal_id)
@@ -535,8 +545,70 @@ class DisciplineCompleter:
             latency_ms=usage.latency_ms,
         )
 
-    def complete_many(self, signal_ids: Iterable[int], *, force: bool = False) -> list[CompletionSummary]:
-        return [self.complete_signal(signal_id, force=force) for signal_id in signal_ids]
+    def complete_many(
+        self,
+        signal_ids: Iterable[int],
+        *,
+        force: bool = False,
+        retries: int = 1,
+        retry_delay_seconds: float = 10.0,
+    ) -> list[CompletionSummary]:
+        return self.complete_many_with_retries(
+            signal_ids,
+            force=force,
+            retries=retries,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+
+    def complete_many_with_retries(
+        self,
+        signal_ids: Iterable[int],
+        *,
+        force: bool = False,
+        retries: int = 1,
+        retry_delay_seconds: float = 10.0,
+    ) -> list[CompletionSummary]:
+        summaries: list[CompletionSummary] = []
+        max_attempts = max(1, retries + 1)
+        for signal_id in signal_ids:
+            attempt = 1
+            while True:
+                try:
+                    summary = self.complete_signal(signal_id, force=force)
+                    summaries.append(replace(summary, attempts=0 if summary.skipped else attempt))
+                    break
+                except Exception as exc:  # noqa: BLE001 - batch mode must isolate one signal failure.
+                    if attempt < max_attempts and _is_retryable_completion_error(exc):
+                        if retry_delay_seconds > 0:
+                            time.sleep(retry_delay_seconds)
+                        attempt += 1
+                        continue
+                    summaries.append(self._failure_summary(signal_id, exc, attempts=attempt))
+                    break
+        return summaries
+
+    def _failure_summary(self, source_signal_id: int, exc: Exception, *, attempts: int) -> CompletionSummary:
+        return CompletionSummary(
+            source_signal_id=source_signal_id,
+            stock_code=self._safe_stock_code(source_signal_id),
+            skipped=False,
+            gate_accepted=False,
+            gate_action="error",
+            gate_reasons=(exc.__class__.__name__,),
+            model=self._summary_model(),
+            latency_ms=None,
+            attempts=attempts,
+            error=_safe_error_text(exc),
+        )
+
+    def _safe_stock_code(self, source_signal_id: int) -> Optional[str]:
+        try:
+            return self.loader.stock_code_for_signal(source_signal_id)
+        except Exception:  # noqa: BLE001 - best-effort diagnostic only.
+            return None
+
+    def _summary_model(self) -> str:
+        return str(getattr(self.client, "model", self.model))
 
 
 def build_completion_prompt(context: CompletionContext, discipline_skill_path: Path) -> str:
@@ -763,6 +835,40 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _is_retryable_completion_error(exc: BaseException) -> bool:
+    retryable_types = (TimeoutError, socket.timeout, urllib.error.URLError, json.JSONDecodeError)
+    retryable_markers = (
+        "timed out",
+        "timeout",
+        "url_error=",
+        "connection reset",
+        "connection aborted",
+        "temporarily unavailable",
+        "http_status=408",
+        "http_status=409",
+        "http_status=429",
+        "http_status=500",
+        "http_status=502",
+        "http_status=503",
+        "http_status=504",
+    )
+    current: Optional[BaseException] = exc
+    while current is not None:
+        if isinstance(current, retryable_types):
+            return True
+        if isinstance(current, RuntimeError):
+            text = str(current).lower()
+            if any(marker in text for marker in retryable_markers):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _safe_error_text(exc: BaseException, *, limit: int = 500) -> str:
+    text = f"{exc.__class__.__name__}: {exc}"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def _text_or_none(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -783,10 +889,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--store-db", type=Path, default=PAPER_DB_PATH)
     parser.add_argument("--key-path", type=Path, default=GEMINI_API_KEY_PATH)
     parser.add_argument("--model", default=G5_DEFAULT_MODEL)
+    parser.add_argument("--retries", type=int, default=1, help="Per-signal retries for transient Gemini/network failures.")
+    parser.add_argument("--retry-delay-seconds", type=float, default=10.0, help="Delay before retrying one signal.")
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     completer = DisciplineCompleter(
         dsa_db_path=args.dsa_db,
@@ -800,9 +908,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     signal_ids = sorted(set(signal_ids))
     if not signal_ids:
         raise SystemExit("Provide --signal-id or --all-active.")
-    summaries = completer.complete_many(signal_ids, force=args.force)
+    summaries = completer.complete_many(
+        signal_ids,
+        force=args.force,
+        retries=max(0, args.retries),
+        retry_delay_seconds=max(0.0, args.retry_delay_seconds),
+    )
     print(_json_dumps([summary.as_dict() for summary in summaries]))
+    return 1 if any(summary.error for summary in summaries) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

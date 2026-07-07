@@ -152,6 +152,20 @@ class FakeGeminiClient:
         )
 
 
+class ScriptedGeminiClient(FakeGeminiClient):
+    def __init__(self, outcomes) -> None:
+        super().__init__()
+        self.outcomes = list(outcomes)
+
+    def generate_json(self, prompt, schema):
+        if self.outcomes:
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                self.calls += 1
+                raise outcome
+        return super().generate_json(prompt, schema)
+
+
 class DisciplineCompletionTests(unittest.TestCase):
     def test_raw_dsa_payload_rejects_but_completed_signal_persists_and_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -212,6 +226,42 @@ class DisciplineCompletionTests(unittest.TestCase):
             result = gate_dsa_output(_guardrail_payload(context.signal, payload))
 
             self.assertFalse(result.accepted)
+
+    def test_complete_many_records_failure_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            store_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            fake_client = FakeGeminiClient()
+            completer = DisciplineCompleter(dsa_db_path=dsa_path, store_db_path=store_path, client=fake_client)
+
+            summaries = completer.complete_many([999, 18], retries=0, retry_delay_seconds=0)
+
+            self.assertEqual(len(summaries), 2)
+            self.assertEqual(summaries[0].source_signal_id, 999)
+            self.assertEqual(summaries[0].gate_action, "error")
+            self.assertIsNotNone(summaries[0].error)
+            self.assertEqual(summaries[0].attempts, 1)
+            self.assertEqual(summaries[1].source_signal_id, 18)
+            self.assertTrue(summaries[1].gate_accepted)
+            self.assertIsNone(summaries[1].error)
+            self.assertEqual(fake_client.calls, 1)
+
+    def test_complete_many_retries_one_timeout_per_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            store_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            fake_client = ScriptedGeminiClient([TimeoutError("Gemini timed out")])
+            completer = DisciplineCompleter(dsa_db_path=dsa_path, store_db_path=store_path, client=fake_client)
+
+            summaries = completer.complete_many([18], retries=1, retry_delay_seconds=0)
+
+            self.assertEqual(len(summaries), 1)
+            self.assertTrue(summaries[0].gate_accepted)
+            self.assertEqual(summaries[0].attempts, 2)
+            self.assertIsNone(summaries[0].error)
+            self.assertEqual(fake_client.calls, 2)
 
 
 if __name__ == "__main__":
