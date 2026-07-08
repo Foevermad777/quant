@@ -113,7 +113,7 @@ class UsPaperEngine:
         self._process_position_triggers(execution_date, bars, logger, stats)
         self._process_exit_signals(execution_date, bars, logger, stats)
 
-        if analysis_count <= 0:
+        if analysis_count <= 0 and not open_candidates:
             logger.info("new_openings_skipped reason=no_analysis_history_for_date")
         elif not open_candidates:
             logger.info("new_openings_skipped reason=no_open_candidates")

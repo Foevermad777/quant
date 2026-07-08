@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from executor.us.config_us import US_MARKET, US_STOCK_POOL
 from executor.us.models_us import DailyBar, DecisionSignal
@@ -92,6 +93,10 @@ def _action_group(action: str) -> str:
 
 ENTRY_ACTIONS = {"buy", "add"}
 EXIT_ACTIONS = {"sell", "reduce", "avoid"}
+US_MARKET_TZ = ZoneInfo("America/New_York")
+LOCAL_RUNTIME_TZ = ZoneInfo("Asia/Shanghai")
+US_REGULAR_OPEN_TIME = time(9, 30, 0)
+TEMPORAL_COLUMNS = ("decision_timestamp", "market_phase", "data_asof", "bar_cutoff", "news_cutoff")
 
 
 class UsSignalReader:
@@ -163,21 +168,24 @@ class UsSignalReader:
         placeholders = self._pool_placeholders()
         if self.has_disciplined_signal_store():
             with self._connect_disciplined() as conn:
+                columns = {row["name"] for row in conn.execute("pragma table_info(disciplined_signals)").fetchall()}
                 rows = conn.execute(
                     f"""
                     select *
                     from disciplined_signals
                     where status = 'active'
                       and gate_accepted = 1
-                      and date(created_at) < ?
-                      and (completed_at is null or date(completed_at) < ?)
                       and market = ?
                       and stock_code in ({placeholders})
                     order by datetime(created_at), source_signal_id
                     """,
-                    self._market_pool_params(execution_date.isoformat(), execution_date.isoformat()),
+                    self._market_pool_params(),
                 ).fetchall()
-            return [self._row_to_disciplined_signal(row) for row in rows]
+            return [
+                self._row_to_disciplined_signal(row)
+                for row in rows
+                if _disciplined_row_available_before(row, execution_date, columns)
+            ]
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -252,6 +260,16 @@ class UsSignalReader:
                     ),
                 ).fetchone()
         if row is None:
+            embedded = signal.metadata.get("dsa_analysis")
+            if isinstance(embedded, dict):
+                operation_advice = embedded.get("operation_advice")
+                return AnalysisAdvice(
+                    report_id=int(embedded.get("id") or signal.source_report_id or 0),
+                    stock_code=str(embedded.get("code") or signal.stock_code),
+                    operation_advice=operation_advice,
+                    action=advice_to_action(str(operation_advice or "")),
+                    created_at=parse_datetime(embedded.get("created_at")),
+                )
             return AnalysisAdvice(0, signal.stock_code, None, "unknown", None)
         operation_advice = row["operation_advice"]
         return AnalysisAdvice(
@@ -421,6 +439,9 @@ class UsSignalReader:
     @staticmethod
     def _row_to_disciplined_signal(row: sqlite3.Row) -> DecisionSignal:
         metadata = _loads_json(row["completion_payload_json"])
+        dsa_analysis = _loads_json(_row_value(row, "dsa_analysis_json"))
+        if dsa_analysis:
+            metadata["dsa_analysis"] = dsa_analysis
         metadata["discipline"] = {
             "schema_version": row["schema_version"],
             "completion_version": row["completion_version"],
@@ -481,3 +502,34 @@ def _row_value(row: sqlite3.Row, key: str) -> Any:
         return row[key]
     except (IndexError, KeyError):
         return None
+
+
+def _disciplined_row_available_before(row: sqlite3.Row, execution_date: date, columns: set[str]) -> bool:
+    if all(column in columns for column in TEMPORAL_COLUMNS):
+        data_asof = parse_date(_row_value(row, "data_asof"))
+        if data_asof is not None:
+            if data_asof >= execution_date:
+                return False
+            completed_utc = _as_utc(parse_datetime(_row_value(row, "completed_at")))
+            open_utc = _us_regular_open_utc(execution_date)
+            return completed_utc is None or completed_utc < open_utc
+    return _legacy_row_date_before(row, "created_at", execution_date) and (
+        _row_value(row, "completed_at") in (None, "") or _legacy_row_date_before(row, "completed_at", execution_date)
+    )
+
+
+def _legacy_row_date_before(row: sqlite3.Row, key: str, execution_date: date) -> bool:
+    parsed = parse_date(_row_value(row, key))
+    return parsed is not None and parsed < execution_date
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=LOCAL_RUNTIME_TZ)
+    return value.astimezone(timezone.utc)
+
+
+def _us_regular_open_utc(execution_date: date) -> datetime:
+    return datetime.combine(execution_date, US_REGULAR_OPEN_TIME, tzinfo=US_MARKET_TZ).astimezone(timezone.utc)

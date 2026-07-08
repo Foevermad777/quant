@@ -73,12 +73,18 @@ def _init_disciplined_db(path: Path) -> None:
                 status text not null,
                 created_at text,
                 expires_at text,
+                decision_timestamp text,
+                market_phase text,
+                data_asof text,
+                bar_cutoff text,
+                news_cutoff text,
                 plan_quality text,
                 schema_version text not null,
                 completion_version text not null,
                 completed_at text not null,
                 updated_at text not null,
                 model text not null,
+                dsa_analysis_json text,
                 completion_payload_json text not null,
                 gate_accepted integer not null,
                 gate_action text not null,
@@ -234,6 +240,112 @@ class UsSignalReaderTests(unittest.TestCase):
             signals = reader.active_signals_before(date(2026, 7, 8))
 
             self.assertEqual([signal.stock_code for signal in signals], ["MSFT"])
+
+    def test_disciplined_store_allows_us_postclose_signal_completed_in_beijing_morning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "buy")
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(
+                    conn,
+                    1,
+                    "AAPL",
+                    "buy",
+                    "us",
+                    1,
+                    completed_at="2026-07-08 04:19:10",
+                )
+                conn.execute(
+                    """
+                    update disciplined_signals
+                    set created_at = '2026-07-08 04:12:45',
+                        decision_timestamp = '2026-07-07 20:12:45.000+00:00',
+                        market_phase = 'postclose',
+                        data_asof = '2026-07-07',
+                        bar_cutoff = '2026-07-07 20:00:00.000+00:00',
+                        news_cutoff = '2026-07-07 20:12:45.000+00:00'
+                    where source_signal_id = 1
+                    """
+                )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("AAPL",))
+
+            signals = reader.open_candidates(date(2026, 7, 8))
+
+            self.assertEqual([signal.stock_code for signal in signals], ["AAPL"])
+
+    def test_disciplined_store_uses_embedded_analysis_when_oos_db_has_no_analysis_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(conn, 1, "AAPL", "buy", "us", 101)
+                conn.execute(
+                    """
+                    update disciplined_signals
+                    set dsa_analysis_json = ?
+                    where source_signal_id = 1
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "id": 101,
+                                "code": "AAPL",
+                                "operation_advice": "buy",
+                                "created_at": "2026-07-07 12:00:00",
+                            }
+                        ),
+                    ),
+                )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("AAPL",))
+
+            signals = reader.open_candidates(date(2026, 7, 8))
+
+            self.assertEqual([signal.stock_code for signal in signals], ["AAPL"])
+
+    def test_disciplined_store_excludes_us_signal_completed_after_regular_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "buy")
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(
+                    conn,
+                    1,
+                    "AAPL",
+                    "buy",
+                    "us",
+                    1,
+                    completed_at="2026-07-08 22:00:00",
+                )
+                conn.execute(
+                    """
+                    update disciplined_signals
+                    set created_at = '2026-07-08 04:12:45',
+                        decision_timestamp = '2026-07-07 20:12:45.000+00:00',
+                        market_phase = 'postclose',
+                        data_asof = '2026-07-07',
+                        bar_cutoff = '2026-07-07 20:00:00.000+00:00',
+                        news_cutoff = '2026-07-07 20:12:45.000+00:00'
+                    where source_signal_id = 1
+                    """
+                )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("AAPL",))
+
+            signals = reader.active_signals_before(date(2026, 7, 8))
+
+            self.assertEqual(signals, [])
 
     def test_entry_points_reuse_market_filtered_active_signals(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

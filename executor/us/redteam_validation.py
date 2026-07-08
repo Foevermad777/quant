@@ -549,15 +549,18 @@ def render_markdown(result: RedTeamValidationResult) -> str:
             "",
             "## R3 Friction And Liquidity Stress Gate",
             "",
-            "| scenario | status | open_slip_mult | per_share_comm | min_comm | SEC fee | trades | fees | reg_fees | final_value | net_return | impact | adjusted_net_return |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| scenario | status | data_gaps | s1_conflicts | open_candidates | filled | blocked | trades | open_slip_mult | per_share_comm | min_comm | SEC fee | fees | reg_fees | final_value | net_return | impact | adjusted_net_return |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for item in result.stress:
         lines.append(
-            f"| {item.scenario} | {item.status} | {item.open_slippage_multiplier:.4f} | "
-            f"{item.commission_per_share:.4f} | {item.min_commission:.2f} | {item.sec_fee_rate:.8f} | "
-            f"{item.trade_count} | {item.total_commissions:.2f} | {item.total_regulatory_fees:.2f} | "
+            f"| {item.scenario} | {item.status} | {item.stats.get('data_gaps', 0)} | "
+            f"{item.stats.get('s1_conflicts', 0)} | {item.stats.get('open_candidates', 0)} | "
+            f"{item.stats.get('filled', 0)} | {item.stats.get('blocked', 0)} | {item.trade_count} | "
+            f"{item.open_slippage_multiplier:.4f} | {item.commission_per_share:.4f} | "
+            f"{item.min_commission:.2f} | {item.sec_fee_rate:.8f} | "
+            f"{item.total_commissions:.2f} | {item.total_regulatory_fees:.2f} | "
             f"{_fmt_float(item.final_total_value)} | {_fmt_pct(item.net_return)} | "
             f"{item.estimated_liquidity_impact:.2f} | {_fmt_pct(item.adjusted_net_return)} |"
         )

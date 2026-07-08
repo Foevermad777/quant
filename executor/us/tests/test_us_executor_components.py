@@ -183,6 +183,102 @@ class UsRulesModelsLedgerTests(unittest.TestCase):
 
 
 class UsPaperEngineTests(unittest.TestCase):
+    def test_disciplined_oos_replay_can_trade_without_analysis_history_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "disciplined.db"
+            ledger_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_bar(conn, "AAPL", "2026-07-08", 30.0, 29.0, 31.0)
+            with sqlite3.connect(disciplined_path) as conn:
+                conn.executescript(
+                    """
+                    create table disciplined_signals (
+                        source_signal_id integer primary key,
+                        source_report_id integer,
+                        stock_code text not null,
+                        stock_name text,
+                        market text not null,
+                        action text not null,
+                        confidence real,
+                        entry_high real,
+                        entry_low real,
+                        stop_loss real,
+                        target_price real,
+                        status text not null,
+                        created_at text,
+                        expires_at text,
+                        decision_timestamp text,
+                        market_phase text,
+                        data_asof text,
+                        bar_cutoff text,
+                        news_cutoff text,
+                        plan_quality text,
+                        schema_version text not null,
+                        completion_version text not null,
+                        completed_at text not null,
+                        updated_at text not null,
+                        model text not null,
+                        dsa_analysis_json text,
+                        completion_payload_json text not null,
+                        gate_accepted integer not null,
+                        gate_action text not null,
+                        gate_reasons_json text not null
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    insert into disciplined_signals(
+                        source_signal_id, source_report_id, stock_code, stock_name, market,
+                        action, confidence, entry_high, entry_low, stop_loss, target_price,
+                        status, created_at, expires_at, decision_timestamp, market_phase,
+                        data_asof, bar_cutoff, news_cutoff, plan_quality, schema_version,
+                        completion_version, completed_at, updated_at, model, dsa_analysis_json,
+                        completion_payload_json, gate_accepted, gate_action, gate_reasons_json
+                    )
+                    values (
+                        1, 101, 'AAPL', 'AAPL', 'us',
+                        'buy', 0.8, 32.0, 28.0, 25.0, null,
+                        'active', '2026-07-08 04:12:45', '2026-07-15 16:00:00',
+                        '2026-07-07 20:12:45.000+00:00', 'postclose',
+                        '2026-07-07', '2026-07-07 20:00:00.000+00:00',
+                        '2026-07-07 20:12:45.000+00:00', 'ok',
+                        'g5-discipline-v0.1', 'g5-minimal-v0.1',
+                        '2026-07-08 04:19:10', '2026-07-08 04:19:10',
+                        'gemini-3.5-flash', ?, '{}', 1, 'pass', '[]'
+                    )
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "id": 101,
+                                "code": "AAPL",
+                                "operation_advice": "buy",
+                                "created_at": "2026-07-08 12:12:45",
+                            }
+                        ),
+                    ),
+                )
+            config = UsExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                disciplined_db_path=disciplined_path,
+                stock_pool=("AAPL",),
+                commission_per_share=0.0,
+                commission_rate=0.0,
+                min_commission=0.0,
+                sec_fee_rate=0.0,
+                slippage_rate=0.0,
+            )
+
+            stats = UsPaperEngine(config).run_day(date(2026, 7, 8))
+
+            self.assertEqual(stats["analysis_count"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 1)
+
     def test_big_gap_open_still_fills_and_same_day_stop_sells_t0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dsa_path = Path(tmpdir) / "dsa.db"
