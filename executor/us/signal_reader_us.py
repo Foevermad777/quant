@@ -2,47 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from executor.us.config_us import US_MARKET, US_STOCK_POOL
-
-
-@dataclass(frozen=True)
-class DailyBar:
-    code: str
-    date: date
-    open: Optional[float]
-    high: Optional[float]
-    low: Optional[float]
-    close: Optional[float]
-    volume: Optional[float] = None
-    amount: Optional[float] = None
-    pct_chg: Optional[float] = None
-
-
-@dataclass(frozen=True)
-class DecisionSignal:
-    id: int
-    stock_code: str
-    stock_name: Optional[str]
-    action: str
-    confidence: Optional[float]
-    entry_high: Optional[float]
-    entry_low: Optional[float]
-    stop_loss: Optional[float]
-    target_price: Optional[float]
-    status: str
-    created_at: Optional[datetime]
-    expires_at: Optional[datetime]
-    source_report_id: Optional[int]
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    market: str = US_MARKET
-    source_type: str = "analysis"
-    source_agent: Optional[str] = None
-    plan_quality: Optional[str] = None
+from executor.us.models_us import DailyBar, DecisionSignal
 
 
 @dataclass(frozen=True)
