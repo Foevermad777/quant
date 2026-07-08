@@ -30,6 +30,9 @@ class UsExecutorConfigTests(unittest.TestCase):
     def test_fee_config_has_sec_fee_but_no_stamp_tax_concept(self) -> None:
         config = UsExecutorConfig()
 
+        self.assertEqual(config.commission_per_share, 0.005)
+        self.assertEqual(config.min_commission, 1.0)
+        self.assertEqual(config.commission_rate, 0.0)
         self.assertGreater(config.sec_fee_rate, 0)
         self.assertFalse(hasattr(config, "stamp_tax_rate"))
 

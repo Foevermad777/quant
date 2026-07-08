@@ -6,6 +6,7 @@ DSA_DIR="${PROJECT_DIR}/vendor/daily_stock_analysis"
 LOG_DIR="${PROJECT_DIR}/runtime_data/logs"
 SECRETS_DIR="${PROJECT_DIR}/runtime_data/secrets"
 LAUNCHER_LOG="${LOG_DIR}/us_dsa_daily_launcher.log"
+US_DSA_LOG="${LOG_DIR}/us_dsa_daily_$(date "+%Y%m%d").log"
 US_STOCKS="${US_STOCKS:-AAPL,NVDA,MSFT,JPM,SPCX}"
 
 timestamp() {
@@ -38,5 +39,11 @@ load_tavily_keys
 export STOCK_LIST="${US_STOCKS}"
 
 cd "${DSA_DIR}"
-log "proxy_check=ok action=start_us_daily_run stocks=${US_STOCKS}"
-exec /usr/bin/caffeinate -i "${DSA_DIR}/.venv/bin/python" "${DSA_DIR}/main.py" --stocks "${US_STOCKS}"
+log "proxy_check=ok action=start_us_daily_run stocks=${US_STOCKS} log=${US_DSA_LOG}"
+if /usr/bin/caffeinate -i "${DSA_DIR}/.venv/bin/python" "${DSA_DIR}/main.py" --stocks "${US_STOCKS}" >> "${US_DSA_LOG}" 2>&1; then
+  log "action=finish_us_daily_run status=ok log=${US_DSA_LOG}"
+else
+  status=$?
+  log "action=finish_us_daily_run status=failed exit=${status} log=${US_DSA_LOG}"
+  exit "${status}"
+fi

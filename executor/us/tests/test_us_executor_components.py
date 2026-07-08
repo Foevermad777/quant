@@ -112,10 +112,21 @@ class UsRulesModelsLedgerTests(unittest.TestCase):
         self.assertEqual(position.sell(2).quantity, 1)
 
     def test_us_fee_model_charges_sec_fee_only_on_sells(self) -> None:
-        fees = UsFeeModel(commission_rate=0.0, min_commission=0.0, sec_fee_rate=27.80 / 1_000_000)
+        fees = UsFeeModel(
+            commission_per_share=0.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            sec_fee_rate=27.80 / 1_000_000,
+        )
 
         self.assertEqual(fees.total_costs(10_000.0, "buy"), (0.0, 0.0))
         self.assertEqual(fees.total_costs(10_000.0, "sell"), (0.0, 0.28))
+
+    def test_us_fee_model_uses_per_share_commission_with_minimum(self) -> None:
+        fees = UsFeeModel(commission_per_share=0.005, commission_rate=0.0, min_commission=1.0, sec_fee_rate=0.0)
+
+        self.assertEqual(fees.total_costs(10_000.0, "buy", shares=100), (1.0, 0.0))
+        self.assertEqual(fees.total_costs(10_000.0, "buy", shares=500), (2.5, 0.0))
 
     def test_us_bar_available_time_uses_eastern_timezone_with_dst(self) -> None:
         available = bar_available_at(date(2026, 7, 8))
@@ -189,6 +200,7 @@ class UsPaperEngineTests(unittest.TestCase):
                 ledger_db_path=ledger_path,
                 disciplined_db_path=ledger_path,
                 stock_pool=("AAPL",),
+                commission_per_share=0.0,
                 commission_rate=0.0,
                 min_commission=0.0,
                 sec_fee_rate=0.0,

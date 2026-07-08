@@ -80,19 +80,25 @@ class SlippageModel:
 
 @dataclass(frozen=True)
 class UsFeeModel:
-    commission_rate: float = 0.00025
-    min_commission: float = 5.0
+    commission_per_share: float = 0.005
+    commission_rate: float = 0.0
+    min_commission: float = 1.0
     sec_fee_rate: float = 27.80 / 1_000_000
 
-    def commission(self, amount: float) -> float:
-        return round(max(self.min_commission, amount * self.commission_rate), 2)
+    def commission(self, amount: float, *, shares: int = 0) -> float:
+        per_share_fee = max(0, abs(int(shares))) * max(0.0, self.commission_per_share)
+        notional_fee = max(0.0, amount) * max(0.0, self.commission_rate)
+        raw_fee = per_share_fee + notional_fee
+        if raw_fee <= 0:
+            return 0.0
+        return round(max(self.min_commission, raw_fee), 2)
 
     def sec_fee(self, amount: float, side: str) -> float:
         if side == "sell":
             return round(amount * self.sec_fee_rate, 2)
         return 0.0
 
-    def total_costs(self, amount: float, side: str) -> tuple[float, float]:
-        commission = self.commission(amount)
+    def total_costs(self, amount: float, side: str, *, shares: int = 0) -> tuple[float, float]:
+        commission = self.commission(amount, shares=shares)
         regulatory_fee = self.sec_fee(amount, side)
         return commission, regulatory_fee

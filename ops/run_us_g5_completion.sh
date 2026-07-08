@@ -24,5 +24,12 @@ exec /usr/bin/caffeinate -i "${PYTHON_BIN}" -m executor.discipline_completion \
   --all-active \
   --store-db "${PAPER_US_DB}" \
   "${STOCK_ARGS[@]}" \
+  --workers 4 \
+  --timeout-seconds 30 \
+  --fallback-provider deepseek \
+  --fallback-model deepseek-chat \
+  --fallback-timeout-seconds 20 \
+  --slow-threshold-ms 15000 \
+  --primary-failure-threshold 2 \
   --retries 1 \
-  --retry-delay-seconds 10
+  --retry-delay-seconds 1

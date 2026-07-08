@@ -125,6 +125,8 @@ def _insert_disciplined_signal(
     action: str,
     market: str,
     source_report_id: int,
+    *,
+    completed_at: str = "2026-07-07 12:05:00",
 ) -> None:
     conn.execute(
         """
@@ -138,10 +140,20 @@ def _insert_disciplined_signal(
         values (?, ?, ?, ?, ?, ?, 0.8, 12.0, 10.0, 9.0, 15.0,
                 'active', '2026-07-07 12:00:00', '2026-07-15 16:00:00',
                 'ok', 'g5-discipline-v0.1', 'g5-minimal-v0.1',
-                '2026-07-07 12:05:00', '2026-07-07 12:05:00',
+                ?, ?,
                 'gemini-3.5-flash', ?, 1, 'pass', '[]')
         """,
-        (source_signal_id, source_report_id, code, code, market, action, json.dumps({"ok": True})),
+        (
+            source_signal_id,
+            source_report_id,
+            code,
+            code,
+            market,
+            action,
+            completed_at,
+            completed_at,
+            json.dumps({"ok": True}),
+        ),
     )
 
 
@@ -187,6 +199,41 @@ class UsSignalReaderTests(unittest.TestCase):
             self.assertEqual([signal.stock_code for signal in signals], ["AAPL"])
             self.assertEqual([signal.market for signal in signals], ["us"])
             self.assertEqual(signals[0].source_type, "disciplined_signal")
+
+    def test_disciplined_store_excludes_g5_completed_on_execution_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "buy")
+                _insert_analysis(conn, 2, "MSFT", "buy")
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(
+                    conn,
+                    1,
+                    "AAPL",
+                    "buy",
+                    "us",
+                    1,
+                    completed_at="2026-07-08 05:00:00",
+                )
+                _insert_disciplined_signal(
+                    conn,
+                    2,
+                    "MSFT",
+                    "buy",
+                    "us",
+                    2,
+                    completed_at="2026-07-07 05:00:00",
+                )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("AAPL", "MSFT"))
+
+            signals = reader.active_signals_before(date(2026, 7, 8))
+
+            self.assertEqual([signal.stock_code for signal in signals], ["MSFT"])
 
     def test_entry_points_reuse_market_filtered_active_signals(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

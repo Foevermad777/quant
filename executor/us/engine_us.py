@@ -61,6 +61,7 @@ class UsPaperEngine:
         self.fill_model = _build_fill_model(self.config.fill_model)
         self.slippage = SlippageModel(self.config.slippage_rate)
         self.fees = UsFeeModel(
+            commission_per_share=self.config.commission_per_share,
             commission_rate=self.config.commission_rate,
             min_commission=self.config.min_commission,
             sec_fee_rate=self.config.sec_fee_rate,
@@ -209,7 +210,7 @@ class UsPaperEngine:
                 continue
 
             gross = round(exec_price * shares, 2)
-            commission, tax = self.fees.total_costs(gross, "buy")
+            commission, tax = self.fees.total_costs(gross, "buy", shares=shares)
             trade = TradeFill(
                 signal_id=signal.id,
                 stock_code=signal.stock_code,
@@ -384,7 +385,7 @@ class UsPaperEngine:
             return
         exec_price = self.slippage.execution_price(float(fill_price), "sell")
         gross = round(exec_price * shares, 2)
-        commission, tax = self.fees.total_costs(gross, "sell")
+        commission, tax = self.fees.total_costs(gross, "sell", shares=shares)
         realized = gross - commission - tax - float(position["avg_cost"]) * shares
         trade = TradeFill(
             signal_id=signal_id,

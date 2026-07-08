@@ -28,8 +28,9 @@ class UsExecutorConfig:
     fill_model: str = FILL_MODEL_NEXT_OPEN
     slippage_rate: float = 0.001
     open_slippage_multiplier: float = 2.0
+    commission_per_share: float = 0.005
     commission_rate: float = 0.0
-    min_commission: float = 0.0
+    min_commission: float = 1.0
     sec_fee_rate: float = 27.80 / 1_000_000
     reduce_exit_rate: float = 0.50
     benchmark_codes: tuple[str, ...] = ("SPY",)

@@ -1,3 +1,5 @@
+import sqlite3
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
@@ -16,6 +18,18 @@ class SignalReaderTests(unittest.TestCase):
         self.assertEqual(advice_to_action("卖出"), "sell")
         self.assertEqual(advice_to_action("减仓"), "reduce")
         self.assertEqual(advice_to_action("避免"), "avoid")
+
+    def test_disciplined_reader_sets_sqlite_busy_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_path = Path(tmpdir) / "paper.db"
+            with sqlite3.connect(store_path) as conn:
+                conn.execute("create table disciplined_signals(source_signal_id integer primary key)")
+            reader = SignalReader(Path(tmpdir) / "dsa.db", store_path, sqlite_timeout_seconds=0.25)
+
+            with reader._connect_disciplined() as conn:
+                row = conn.execute("pragma busy_timeout").fetchone()
+
+            self.assertEqual(row[0], 250)
 
     @unittest.skipUnless(DSA_DB.exists(), "local DSA database is not present")
     def test_600900_s1_conflict_is_skipped(self) -> None:

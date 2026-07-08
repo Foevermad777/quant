@@ -1,13 +1,18 @@
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from datetime import date
 from pathlib import Path
 
 from executor.discipline_completion import (
     DisciplineCompleter,
+    G5CircuitBreaker,
     GeminiUsage,
+    RoutedStructuredClient,
     _guardrail_payload,
+    discipline_temporal_metadata,
     normalize_completion_payload,
 )
 from executor.guardrails import MISSING_INVALID_CONDITIONS, MISSING_SCENARIOS, gate_dsa_output
@@ -103,10 +108,33 @@ def _init_dsa_db(path: Path) -> None:
         )
 
 
+def _clone_signal(path: Path, source_id: int, new_id: int) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            insert into decision_signals(
+                id, stock_code, stock_name, market, source_type, source_agent, source_report_id,
+                action, confidence, score, entry_high, entry_low, stop_loss, target_price,
+                invalidation, reason, risk_summary, catalyst_summary, plan_quality, status,
+                created_at, expires_at, metadata_json
+            )
+            select
+                ?, stock_code, stock_name, market, source_type, source_agent, source_report_id,
+                action, confidence, score, entry_high, entry_low, stop_loss, target_price,
+                invalidation, reason, risk_summary, catalyst_summary, plan_quality, status,
+                created_at, expires_at, metadata_json
+            from decision_signals
+            where id = ?
+            """,
+            (new_id, source_id),
+        )
+
+
 class FakeGeminiClient:
     model = "fake-gemini"
 
-    def __init__(self) -> None:
+    def __init__(self, *, model: str = "fake-gemini") -> None:
+        self.model = model
         self.calls = 0
 
     def generate_json(self, prompt, schema):
@@ -166,6 +194,18 @@ class ScriptedGeminiClient(FakeGeminiClient):
         return super().generate_json(prompt, schema)
 
 
+class SlowGeminiClient(FakeGeminiClient):
+    def __init__(self, delay_seconds: float) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+        self._lock = threading.Lock()
+
+    def generate_json(self, prompt, schema):
+        time.sleep(self.delay_seconds)
+        with self._lock:
+            return super().generate_json(prompt, schema)
+
+
 class DisciplineCompletionTests(unittest.TestCase):
     def test_raw_dsa_payload_rejects_but_completed_signal_persists_and_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,7 +231,7 @@ class DisciplineCompletionTests(unittest.TestCase):
             self.assertEqual(fake_client.calls, 1)
 
             reader = SignalReader(dsa_path, store_path)
-            signals = reader.active_signals_before(date(2026, 7, 8))
+            signals = reader.active_signals_before(date(2100, 1, 1))
             self.assertEqual([signal.id for signal in signals], [18])
             self.assertEqual(signals[0].source_type, "disciplined_signal")
             self.assertEqual(signals[0].confidence, 0.52)
@@ -262,6 +302,78 @@ class DisciplineCompletionTests(unittest.TestCase):
             self.assertEqual(summaries[0].attempts, 2)
             self.assertIsNone(summaries[0].error)
             self.assertEqual(fake_client.calls, 2)
+
+    def test_complete_many_parallelizes_independent_api_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            store_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            for signal_id in (19, 20, 21):
+                _clone_signal(dsa_path, 18, signal_id)
+            fake_client = SlowGeminiClient(delay_seconds=0.2)
+            completer = DisciplineCompleter(dsa_db_path=dsa_path, store_db_path=store_path, client=fake_client)
+
+            started_at = time.monotonic()
+            summaries = completer.complete_many([18, 19, 20, 21], retries=0, retry_delay_seconds=0, workers=4)
+            elapsed = time.monotonic() - started_at
+
+            self.assertEqual([summary.source_signal_id for summary in summaries], [18, 19, 20, 21])
+            self.assertTrue(all(summary.gate_accepted for summary in summaries))
+            self.assertTrue(all(summary.error is None for summary in summaries))
+            self.assertEqual(fake_client.calls, 4)
+            self.assertLess(elapsed, 0.6)
+
+    def test_complete_many_falls_back_after_two_primary_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            store_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            primary = ScriptedGeminiClient([TimeoutError("Gemini timed out"), TimeoutError("Gemini timed out")])
+            fallback = FakeGeminiClient(model="deepseek-chat")
+            routed_client = RoutedStructuredClient(
+                primary=primary,
+                fallback=fallback,
+                circuit_breaker=G5CircuitBreaker(failure_threshold=2, slow_threshold_ms=15_000),
+            )
+            completer = DisciplineCompleter(dsa_db_path=dsa_path, store_db_path=store_path, client=routed_client)
+
+            summaries = completer.complete_many([18], retries=1, retry_delay_seconds=0)
+
+            self.assertEqual(len(summaries), 1)
+            self.assertTrue(summaries[0].gate_accepted)
+            self.assertEqual(summaries[0].attempts, 2)
+            self.assertEqual(summaries[0].model, "deepseek-chat")
+            self.assertEqual(primary.calls, 2)
+            self.assertEqual(fallback.calls, 1)
+            with sqlite3.connect(store_path) as conn:
+                row = conn.execute("select model from disciplined_signals where source_signal_id = 18").fetchone()
+            self.assertEqual(row[0], "deepseek-chat")
+
+    def test_temporal_metadata_uses_a_share_close_in_utc(self) -> None:
+        metadata = discipline_temporal_metadata({"market": "cn", "created_at": "2026-07-07 18:00:00"})
+
+        self.assertEqual(metadata["market_phase"], "postclose")
+        self.assertEqual(metadata["data_asof"], "2026-07-07")
+        self.assertEqual(metadata["decision_timestamp"], "2026-07-07 10:00:00.000+00:00")
+        self.assertEqual(metadata["bar_cutoff"], "2026-07-07 07:00:00.000+00:00")
+        self.assertEqual(metadata["news_cutoff"], "2026-07-07 10:00:00.000+00:00")
+
+    def test_temporal_metadata_uses_us_regular_close_with_dst(self) -> None:
+        metadata = discipline_temporal_metadata({"market": "us", "created_at": "2026-07-08 05:10:00"})
+
+        self.assertEqual(metadata["market_phase"], "postclose")
+        self.assertEqual(metadata["data_asof"], "2026-07-07")
+        self.assertEqual(metadata["decision_timestamp"], "2026-07-07 21:10:00.000+00:00")
+        self.assertEqual(metadata["bar_cutoff"], "2026-07-07 20:00:00.000+00:00")
+        self.assertEqual(metadata["news_cutoff"], "2026-07-07 21:10:00.000+00:00")
+
+    def test_temporal_metadata_uses_us_regular_close_in_standard_time(self) -> None:
+        metadata = discipline_temporal_metadata({"market": "us", "created_at": "2026-01-08 06:10:00"})
+
+        self.assertEqual(metadata["market_phase"], "postclose")
+        self.assertEqual(metadata["data_asof"], "2026-01-07")
+        self.assertEqual(metadata["decision_timestamp"], "2026-01-07 22:10:00.000+00:00")
+        self.assertEqual(metadata["bar_cutoff"], "2026-01-07 21:00:00.000+00:00")
 
 
 if __name__ == "__main__":

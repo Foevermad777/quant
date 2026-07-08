@@ -170,11 +170,12 @@ class UsSignalReader:
                     where status = 'active'
                       and gate_accepted = 1
                       and date(created_at) < ?
+                      and (completed_at is null or date(completed_at) < ?)
                       and market = ?
                       and stock_code in ({placeholders})
                     order by datetime(created_at), source_signal_id
                     """,
-                    self._market_pool_params(execution_date.isoformat()),
+                    self._market_pool_params(execution_date.isoformat(), execution_date.isoformat()),
                 ).fetchall()
             return [self._row_to_disciplined_signal(row) for row in rows]
 
@@ -429,6 +430,13 @@ class UsSignalReader:
             "gate_action": row["gate_action"],
             "gate_reasons": json.loads(row["gate_reasons_json"] or "[]"),
         }
+        metadata["temporal"] = {
+            "decision_timestamp": _row_value(row, "decision_timestamp"),
+            "market_phase": _row_value(row, "market_phase"),
+            "data_asof": _row_value(row, "data_asof"),
+            "bar_cutoff": _row_value(row, "bar_cutoff"),
+            "news_cutoff": _row_value(row, "news_cutoff"),
+        }
         return DecisionSignal(
             id=int(row["source_signal_id"]),
             stock_code=row["stock_code"],
@@ -466,3 +474,10 @@ class UsSignalReader:
             amount=row["amount"],
             pct_chg=row["pct_chg"],
         )
+
+
+def _row_value(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None

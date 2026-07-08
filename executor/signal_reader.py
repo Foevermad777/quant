@@ -91,6 +91,7 @@ def _action_group(action: str) -> str:
 
 ENTRY_ACTIONS = {"buy", "add"}
 EXIT_ACTIONS = {"sell", "reduce", "avoid"}
+SQLITE_BUSY_TIMEOUT_SECONDS = 10.0
 
 
 class SignalReader:
@@ -100,23 +101,27 @@ class SignalReader:
         disciplined_db_path: Optional[Path] = None,
         *,
         use_disciplined_signals: bool = True,
+        sqlite_timeout_seconds: float = SQLITE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.disciplined_db_path = Path(disciplined_db_path) if disciplined_db_path is not None else None
         self.use_disciplined_signals = use_disciplined_signals
+        self.sqlite_timeout_seconds = sqlite_timeout_seconds
 
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self.db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        conn = sqlite3.connect(uri, uri=True, timeout=self.sqlite_timeout_seconds)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"pragma busy_timeout = {int(self.sqlite_timeout_seconds * 1000)}")
         return conn
 
     def _connect_disciplined(self) -> sqlite3.Connection:
         if self.disciplined_db_path is None:
             raise FileNotFoundError("disciplined signal store is not configured")
         uri = f"file:{self.disciplined_db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        conn = sqlite3.connect(uri, uri=True, timeout=self.sqlite_timeout_seconds)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"pragma busy_timeout = {int(self.sqlite_timeout_seconds * 1000)}")
         return conn
 
     def has_disciplined_signal_store(self) -> bool:
@@ -156,9 +161,10 @@ class SignalReader:
                     where status = 'active'
                       and gate_accepted = 1
                       and date(created_at) < ?
+                      and (completed_at is null or date(completed_at) < ?)
                     order by datetime(created_at), source_signal_id
                     """,
-                    (execution_date.isoformat(),),
+                    (execution_date.isoformat(), execution_date.isoformat()),
                 ).fetchall()
             return [self._row_to_disciplined_signal(row) for row in rows]
 
@@ -403,6 +409,13 @@ class SignalReader:
             "gate_action": row["gate_action"],
             "gate_reasons": json.loads(row["gate_reasons_json"] or "[]"),
         }
+        metadata["temporal"] = {
+            "decision_timestamp": _row_value(row, "decision_timestamp"),
+            "market_phase": _row_value(row, "market_phase"),
+            "data_asof": _row_value(row, "data_asof"),
+            "bar_cutoff": _row_value(row, "bar_cutoff"),
+            "news_cutoff": _row_value(row, "news_cutoff"),
+        }
         return DecisionSignal(
             id=int(row["source_signal_id"]),
             stock_code=row["stock_code"],
@@ -440,3 +453,10 @@ class SignalReader:
             amount=row["amount"],
             pct_chg=row["pct_chg"],
         )
+
+
+def _row_value(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
