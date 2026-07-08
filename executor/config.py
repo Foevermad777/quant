@@ -15,7 +15,7 @@ DSA_DB_PATH = RUNTIME_DIR / "dsa" / "stock_analysis.db"
 PAPER_DB_PATH = QUANT_DIR / "paper.db"
 GEMINI_API_KEY_PATH = SECRETS_DIR / "gemini_api_key.txt"
 DISCIPLINE_SKILL_PATH = PROJECT_ROOT / "dsa_skills" / "discipline.yaml"
-G5_DEFAULT_MODEL = "gemini-3-flash-preview"
+G5_DEFAULT_MODEL = "gemini-3.5-flash"
 G5_COMPLETION_VERSION = "g5-minimal-v0.1"
 G5_SCHEMA_VERSION = "g5-discipline-v0.1"
 
