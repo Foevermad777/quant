@@ -7,9 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-
-DEFAULT_US_STOCK_POOL = ("AAPL", "NVDA", "MSFT", "JPM", "SPCX")
-US_MARKET = "us"
+from executor.us.config_us import US_MARKET, US_STOCK_POOL
 
 
 @dataclass(frozen=True)
@@ -136,7 +134,7 @@ class UsSignalReader:
         db_path: Path,
         disciplined_db_path: Optional[Path] = None,
         *,
-        stock_pool: Sequence[str] = DEFAULT_US_STOCK_POOL,
+        stock_pool: Sequence[str] = US_STOCK_POOL,
         market: str = US_MARKET,
         use_disciplined_signals: bool = True,
     ) -> None:
