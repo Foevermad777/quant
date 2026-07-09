@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from executor.intent_resolution import (
+    action_group as _action_group,
+    advice_to_action,
+    resolve_intent,
+)
 from executor.us.config_us import US_MARKET, US_STOCK_POOL
 from executor.us.models_us import DailyBar, DecisionSignal
 
@@ -19,6 +24,12 @@ class AnalysisAdvice:
     operation_advice: Optional[str]
     action: str
     created_at: Optional[datetime]
+    flat_account_action: str = "unknown"
+    holding_action: str = "unknown"
+    resolved_action: str = "unknown"
+    conflict_status: str = "hard_conflict"
+    conflict_reason: str = ""
+    intent_source: str = "legacy_operation_advice"
 
 
 def parse_datetime(value: Any) -> Optional[datetime]:
@@ -59,40 +70,6 @@ def _loads_json(text: Any) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def advice_to_action(advice: Optional[str]) -> str:
-    text = (advice or "").strip().lower()
-    if not text:
-        return "unknown"
-    if any(token in text for token in ("卖出", "清仓", "strong sell", "sell")):
-        return "sell"
-    if any(token in text for token in ("减仓", "reduce")):
-        return "reduce"
-    if any(token in text for token in ("避免", "回避", "avoid")):
-        return "avoid"
-    if any(token in text for token in ("加仓", "add")):
-        return "add"
-    if any(token in text for token in ("买入", "建仓", "buy")):
-        return "buy"
-    if any(token in text for token in ("持有", "hold")):
-        return "hold"
-    if any(token in text for token in ("观望", "等待", "watch", "wait")):
-        return "watch"
-    return "unknown"
-
-
-def _action_group(action: str) -> str:
-    normalized = (action or "").strip().lower()
-    if normalized in {"buy", "add"}:
-        return "entry"
-    if normalized in {"sell", "reduce", "avoid"}:
-        return "exit"
-    if normalized in {"hold", "watch", "alert"}:
-        return "neutral"
-    return "unknown"
-
-
-ENTRY_ACTIONS = {"buy", "add"}
-EXIT_ACTIONS = {"sell", "reduce", "avoid"}
 US_MARKET_TZ = ZoneInfo("America/New_York")
 LOCAL_RUNTIME_TZ = ZoneInfo("Asia/Shanghai")
 US_REGULAR_OPEN_TIME = time(9, 30, 0)
@@ -202,41 +179,38 @@ class UsSignalReader:
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 
-    def open_candidates(self, execution_date: date) -> List[DecisionSignal]:
-        signals = [
-            signal
-            for signal in self.active_signals_before(execution_date)
-            if signal.action in ENTRY_ACTIONS
-        ]
+    def open_candidates(self, execution_date: date, held_symbols: Optional[Iterable[str]] = None) -> List[DecisionSignal]:
+        held = set(held_symbols or ())
         consistent = []
-        for signal in signals:
-            advice = self.advice_for_signal(signal)
-            if self.is_s1_consistent(signal, advice):
-                consistent.append(signal)
+        for signal in self.active_signals_before(execution_date):
+            advice = self.advice_for_signal(signal, has_position=signal.stock_code in held)
+            if _action_group(advice.action) == "entry" and self.is_s1_consistent(signal, advice):
+                consistent.append(self._with_execution_action(signal, advice))
         return self._latest_by_symbol(consistent)
 
-    def exit_candidates(self, execution_date: date) -> List[DecisionSignal]:
-        signals = [
-            signal
-            for signal in self.active_signals_before(execution_date)
-            if signal.action in EXIT_ACTIONS
-        ]
+    def exit_candidates(self, execution_date: date, held_symbols: Optional[Iterable[str]] = None) -> List[DecisionSignal]:
+        held = set(held_symbols or ())
         consistent = []
-        for signal in signals:
-            advice = self.advice_for_signal(signal)
-            if self.is_s1_consistent(signal, advice):
-                consistent.append(signal)
+        for signal in self.active_signals_before(execution_date):
+            advice = self.advice_for_signal(signal, has_position=signal.stock_code in held)
+            if _action_group(advice.action) == "exit" and self.is_s1_consistent(signal, advice):
+                consistent.append(self._with_execution_action(signal, advice))
         return self._latest_by_symbol(consistent)
 
-    def s1_conflicts(self, execution_date: date) -> List[tuple[DecisionSignal, AnalysisAdvice]]:
+    def s1_conflicts(
+        self,
+        execution_date: date,
+        held_symbols: Optional[Iterable[str]] = None,
+    ) -> List[tuple[DecisionSignal, AnalysisAdvice]]:
+        held = set(held_symbols or ())
         conflicts: List[tuple[DecisionSignal, AnalysisAdvice]] = []
         for signal in self.active_signals_before(execution_date):
-            advice = self.advice_for_signal(signal)
+            advice = self.advice_for_signal(signal, has_position=signal.stock_code in held)
             if not self.is_s1_consistent(signal, advice):
                 conflicts.append((signal, advice))
         return conflicts
 
-    def advice_for_signal(self, signal: DecisionSignal) -> AnalysisAdvice:
+    def advice_for_signal(self, signal: DecisionSignal, *, has_position: bool = False) -> AnalysisAdvice:
         with self._connect() as conn:
             row = None
             if signal.source_report_id is not None:
@@ -263,29 +237,90 @@ class UsSignalReader:
             embedded = signal.metadata.get("dsa_analysis")
             if isinstance(embedded, dict):
                 operation_advice = embedded.get("operation_advice")
-                return AnalysisAdvice(
+                return self._resolved_advice(
+                    signal=signal,
                     report_id=int(embedded.get("id") or signal.source_report_id or 0),
                     stock_code=str(embedded.get("code") or signal.stock_code),
-                    operation_advice=operation_advice,
-                    action=advice_to_action(str(operation_advice or "")),
+                    operation_advice=str(operation_advice or ""),
                     created_at=parse_datetime(embedded.get("created_at")),
+                    has_position=has_position,
                 )
-            return AnalysisAdvice(0, signal.stock_code, None, "unknown", None)
+            return self._resolved_advice(
+                signal=signal,
+                report_id=0,
+                stock_code=signal.stock_code,
+                operation_advice=None,
+                created_at=None,
+                has_position=has_position,
+            )
         operation_advice = row["operation_advice"]
-        return AnalysisAdvice(
+        return self._resolved_advice(
+            signal=signal,
             report_id=int(row["id"]),
             stock_code=row["code"],
             operation_advice=operation_advice,
-            action=advice_to_action(operation_advice),
             created_at=parse_datetime(row["created_at"]),
+            has_position=has_position,
         )
 
     def is_s1_consistent(self, signal: DecisionSignal, advice: AnalysisAdvice) -> bool:
-        signal_group = _action_group(signal.action)
         advice_group = _action_group(advice.action)
-        if signal_group == "unknown" or advice_group == "unknown":
+        if advice_group == "unknown":
+            return False
+        if advice.conflict_status in {"hard_conflict", "conditional_entry"}:
+            return False
+        if advice.conflict_status == "position_context_split":
+            return advice_group in {"entry", "exit"}
+        if advice.intent_source == "g5":
+            return advice.conflict_status == "consistent"
+        signal_group = _action_group(signal.action)
+        if signal_group == "unknown":
             return False
         return signal_group == advice_group
+
+    def _resolved_advice(
+        self,
+        *,
+        signal: DecisionSignal,
+        report_id: int,
+        stock_code: str,
+        operation_advice: Optional[str],
+        created_at: Optional[datetime],
+        has_position: bool,
+    ) -> AnalysisAdvice:
+        resolution = resolve_intent(
+            signal_action=signal.action,
+            operation_advice=operation_advice,
+            metadata=signal.metadata,
+            has_position=has_position,
+        )
+        return AnalysisAdvice(
+            report_id=report_id,
+            stock_code=stock_code,
+            operation_advice=operation_advice,
+            action=resolution.effective_action,
+            created_at=created_at,
+            flat_account_action=resolution.flat_account_action,
+            holding_action=resolution.holding_action,
+            resolved_action=resolution.resolved_action,
+            conflict_status=resolution.conflict_status,
+            conflict_reason=resolution.conflict_reason,
+            intent_source=resolution.source,
+        )
+
+    @staticmethod
+    def _with_execution_action(signal: DecisionSignal, advice: AnalysisAdvice) -> DecisionSignal:
+        metadata = dict(signal.metadata)
+        metadata["intent_resolution"] = {
+            "flat_account_action": advice.flat_account_action,
+            "holding_action": advice.holding_action,
+            "resolved_action": advice.resolved_action,
+            "effective_action": advice.action,
+            "conflict_status": advice.conflict_status,
+            "conflict_reason": advice.conflict_reason,
+            "intent_source": advice.intent_source,
+        }
+        return replace(signal, action=advice.action, metadata=metadata)
 
     def bar(self, stock_code: str, day: date) -> Optional[DailyBar]:
         with self._connect() as conn:
@@ -439,6 +474,11 @@ class UsSignalReader:
     @staticmethod
     def _row_to_disciplined_signal(row: sqlite3.Row) -> DecisionSignal:
         metadata = _loads_json(row["completion_payload_json"])
+        intent_resolution = _row_intent_resolution(row, metadata)
+        if intent_resolution:
+            metadata["intent_resolution"] = intent_resolution
+            for key, value in intent_resolution.items():
+                metadata.setdefault(key, value)
         dsa_analysis = _loads_json(_row_value(row, "dsa_analysis_json"))
         if dsa_analysis:
             metadata["dsa_analysis"] = dsa_analysis
@@ -502,6 +542,17 @@ def _row_value(row: sqlite3.Row, key: str) -> Any:
         return row[key]
     except (IndexError, KeyError):
         return None
+
+
+def _row_intent_resolution(row: sqlite3.Row, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    resolution = {
+        "flat_account_action": _row_value(row, "flat_account_action") or metadata.get("flat_account_action"),
+        "holding_action": _row_value(row, "holding_action") or metadata.get("holding_action"),
+        "resolved_action": _row_value(row, "resolved_action") or metadata.get("resolved_action"),
+        "conflict_status": _row_value(row, "conflict_status") or metadata.get("conflict_status"),
+        "conflict_reason": _row_value(row, "conflict_reason") or metadata.get("conflict_reason"),
+    }
+    return {key: value for key, value in resolution.items() if value not in (None, "")}
 
 
 def _disciplined_row_available_before(row: sqlite3.Row, execution_date: date, columns: set[str]) -> bool:

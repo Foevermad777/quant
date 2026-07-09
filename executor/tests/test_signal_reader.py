@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -8,6 +9,141 @@ from executor.signal_reader import SignalReader, advice_to_action
 
 
 DSA_DB = Path(__file__).resolve().parents[2] / "runtime_data" / "dsa" / "stock_analysis.db"
+
+
+def _init_dsa_db(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            create table analysis_history (
+                id integer primary key,
+                code text not null,
+                name text,
+                operation_advice text,
+                created_at text
+            );
+            create table decision_signals (
+                id integer primary key,
+                stock_code text not null,
+                stock_name text,
+                action text not null,
+                confidence real,
+                entry_high real,
+                entry_low real,
+                stop_loss real,
+                target_price real,
+                status text not null,
+                created_at text,
+                expires_at text,
+                source_report_id integer,
+                metadata_json text,
+                market text,
+                source_type text,
+                source_agent text,
+                plan_quality text
+            );
+            """
+        )
+
+
+def _init_disciplined_db(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            create table disciplined_signals (
+                source_signal_id integer primary key,
+                source_report_id integer,
+                stock_code text not null,
+                stock_name text,
+                market text not null,
+                action text not null,
+                confidence real,
+                entry_high real,
+                entry_low real,
+                stop_loss real,
+                target_price real,
+                status text not null,
+                created_at text,
+                expires_at text,
+                plan_quality text,
+                schema_version text not null,
+                completion_version text not null,
+                completed_at text not null,
+                updated_at text not null,
+                model text not null,
+                completion_payload_json text not null,
+                gate_accepted integer not null,
+                gate_action text not null,
+                gate_reasons_json text not null
+            );
+            """
+        )
+
+
+def _insert_analysis(conn: sqlite3.Connection, row_id: int, code: str, advice: str) -> None:
+    conn.execute(
+        "insert into analysis_history(id, code, name, operation_advice, created_at) values (?, ?, ?, ?, ?)",
+        (row_id, code, code, advice, "2026-07-08 10:00:00"),
+    )
+
+
+def _insert_signal(conn: sqlite3.Connection, row_id: int, code: str, action: str, source_report_id: int) -> None:
+    conn.execute(
+        """
+        insert into decision_signals(
+            id, stock_code, stock_name, action, confidence, entry_high, entry_low,
+            stop_loss, target_price, status, created_at, expires_at, source_report_id,
+            metadata_json, market, source_type, source_agent, plan_quality
+        )
+        values (?, ?, ?, ?, 0.8, 12.0, 10.0, 9.0, 15.0, 'active',
+                '2026-07-08 10:00:00', '2026-07-15 15:00:00', ?,
+                ?, 'cn', 'analysis', 'test', 'ok')
+        """,
+        (row_id, code, code, action, source_report_id, json.dumps({})),
+    )
+
+
+def _intent_payload(
+    *,
+    flat_account_action: str = "watch",
+    holding_action: str = "hold",
+    resolved_action: str = "watch",
+    conflict_status: str = "position_context_split",
+) -> dict:
+    return {
+        "flat_account_action": flat_account_action,
+        "holding_action": holding_action,
+        "resolved_action": resolved_action,
+        "conflict_status": conflict_status,
+        "conflict_reason": "正文建议持仓者持有，空仓者等待回踩，不应直接追买。",
+    }
+
+
+def _insert_disciplined_signal(
+    conn: sqlite3.Connection,
+    source_signal_id: int,
+    code: str,
+    action: str,
+    source_report_id: int,
+    payload: dict,
+) -> None:
+    conn.execute(
+        """
+        insert into disciplined_signals(
+            source_signal_id, source_report_id, stock_code, stock_name, market,
+            action, confidence, entry_high, entry_low, stop_loss, target_price,
+            status, created_at, expires_at, plan_quality, schema_version,
+            completion_version, completed_at, updated_at, model,
+            completion_payload_json, gate_accepted, gate_action, gate_reasons_json
+        )
+        values (?, ?, ?, ?, 'cn', ?, 0.8, 12.0, 10.0, 9.0, 15.0,
+                'active', '2026-07-08 10:00:00', '2026-07-15 15:00:00',
+                'ok', 'g5-discipline-v0.1', 'g5-minimal-v0.1',
+                '2026-07-08 10:05:00', '2026-07-08 10:05:00',
+                'gemini-3.5-flash', ?, 1, 'pass', '[]')
+        """,
+        (source_signal_id, source_report_id, code, code, action, json.dumps(payload, ensure_ascii=False)),
+    )
 
 
 class SignalReaderTests(unittest.TestCase):
@@ -52,6 +188,71 @@ class SignalReaderTests(unittest.TestCase):
 
         self.assertNotIn(6, ids)
         self.assertNotIn(7, ids)
+
+    def test_g5_position_context_samples_do_not_open_flat_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                for row_id, code in ((1, "600900"), (2, "600036")):
+                    _insert_analysis(conn, row_id, code, "持有")
+                    _insert_signal(conn, row_id, code, "buy", row_id)
+            with sqlite3.connect(disciplined_path) as conn:
+                for row_id, code in ((1, "600900"), (2, "600036")):
+                    _insert_disciplined_signal(conn, row_id, code, "buy", row_id, _intent_payload())
+
+            reader = SignalReader(dsa_path, disciplined_path)
+
+            self.assertEqual(reader.open_candidates(date(2026, 7, 9)), [])
+            conflicts = reader.s1_conflicts(date(2026, 7, 9))
+
+            self.assertEqual([signal.stock_code for signal, _ in conflicts], ["600900", "600036"])
+            self.assertTrue(all(advice.conflict_status == "position_context_split" for _, advice in conflicts))
+            self.assertTrue(all(advice.flat_account_action == "watch" for _, advice in conflicts))
+            self.assertTrue(all(advice.holding_action == "hold" for _, advice in conflicts))
+
+    def test_conditional_entry_is_blocked_without_direct_buy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+
+            reader = SignalReader(dsa_path)
+            conflicts = reader.s1_conflicts(date(2026, 7, 9))
+
+            self.assertEqual(reader.open_candidates(date(2026, 7, 9)), [])
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0][1].conflict_status, "conditional_entry")
+            self.assertEqual(conflicts[0][1].resolved_action, "watch")
+
+    def test_holding_context_can_use_holding_action_for_exit_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "持仓者减仓，空仓者等待回踩")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(
+                    conn,
+                    1,
+                    "600900",
+                    "buy",
+                    1,
+                    _intent_payload(holding_action="reduce"),
+                )
+
+            reader = SignalReader(dsa_path, disciplined_path)
+            candidates = reader.exit_candidates(date(2026, 7, 9), held_symbols={"600900"})
+
+            self.assertEqual([signal.stock_code for signal in candidates], ["600900"])
+            self.assertEqual(candidates[0].action, "reduce")
 
 
 if __name__ == "__main__":

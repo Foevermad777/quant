@@ -133,7 +133,9 @@ def _insert_disciplined_signal(
     source_report_id: int,
     *,
     completed_at: str = "2026-07-07 12:05:00",
+    completion_payload: dict | None = None,
 ) -> None:
+    payload = completion_payload if completion_payload is not None else {"ok": True}
     conn.execute(
         """
         insert into disciplined_signals(
@@ -158,9 +160,25 @@ def _insert_disciplined_signal(
             action,
             completed_at,
             completed_at,
-            json.dumps({"ok": True}),
+            json.dumps(payload, ensure_ascii=False),
         ),
     )
+
+
+def _intent_payload(
+    *,
+    flat_account_action: str = "watch",
+    holding_action: str = "hold",
+    resolved_action: str = "watch",
+    conflict_status: str = "position_context_split",
+) -> dict:
+    return {
+        "flat_account_action": flat_account_action,
+        "holding_action": holding_action,
+        "resolved_action": resolved_action,
+        "conflict_status": conflict_status,
+        "conflict_reason": "正文建议持仓者持有，空仓者等待回踩，不应直接追买。",
+    }
 
 
 class UsSignalReaderTests(unittest.TestCase):
@@ -309,6 +327,63 @@ class UsSignalReaderTests(unittest.TestCase):
             signals = reader.open_candidates(date(2026, 7, 8))
 
             self.assertEqual([signal.stock_code for signal in signals], ["AAPL"])
+
+    def test_g5_position_context_samples_do_not_open_flat_us_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            samples = ((1, "AAPL"), (2, "JPM"), (3, "MSFT"))
+            with sqlite3.connect(dsa_path) as conn:
+                for row_id, code in samples:
+                    _insert_analysis(conn, row_id, code, "持有")
+            with sqlite3.connect(disciplined_path) as conn:
+                for row_id, code in samples:
+                    _insert_disciplined_signal(
+                        conn,
+                        row_id,
+                        code,
+                        "buy",
+                        "us",
+                        row_id,
+                        completion_payload=_intent_payload(),
+                    )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("AAPL", "JPM", "MSFT"))
+
+            self.assertEqual(reader.open_candidates(date(2026, 7, 8)), [])
+            conflicts = reader.s1_conflicts(date(2026, 7, 8))
+
+            self.assertEqual([signal.stock_code for signal, _ in conflicts], ["AAPL", "JPM", "MSFT"])
+            self.assertTrue(all(advice.conflict_status == "position_context_split" for _, advice in conflicts))
+            self.assertTrue(all(advice.flat_account_action == "watch" for _, advice in conflicts))
+            self.assertTrue(all(advice.holding_action == "hold" for _, advice in conflicts))
+
+    def test_us_holding_context_can_use_holding_action_for_exit_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "JPM", "持仓者减仓，空仓者等待回踩")
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(
+                    conn,
+                    1,
+                    "JPM",
+                    "buy",
+                    "us",
+                    1,
+                    completion_payload=_intent_payload(holding_action="reduce"),
+                )
+
+            reader = UsSignalReader(dsa_path, disciplined_path, stock_pool=("JPM",))
+            candidates = reader.exit_candidates(date(2026, 7, 8), held_symbols={"JPM"})
+
+            self.assertEqual([signal.stock_code for signal in candidates], ["JPM"])
+            self.assertEqual(candidates[0].action, "reduce")
 
     def test_disciplined_store_excludes_us_signal_completed_after_regular_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

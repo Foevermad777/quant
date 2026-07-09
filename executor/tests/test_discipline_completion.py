@@ -236,6 +236,19 @@ class DisciplineCompletionTests(unittest.TestCase):
             self.assertEqual(signals[0].source_type, "disciplined_signal")
             self.assertEqual(signals[0].confidence, 0.52)
             self.assertEqual(signals[0].metadata["discipline"]["schema_version"], "g5-discipline-v0.1")
+            self.assertEqual(signals[0].metadata["flat_account_action"], "hold")
+            self.assertEqual(signals[0].metadata["holding_action"], "hold")
+            self.assertEqual(signals[0].metadata["resolved_action"], "hold")
+            self.assertEqual(signals[0].metadata["conflict_status"], "consistent")
+            with sqlite3.connect(store_path) as conn:
+                row = conn.execute(
+                    """
+                    select flat_account_action, holding_action, resolved_action, conflict_status
+                    from disciplined_signals
+                    where source_signal_id = 18
+                    """
+                ).fetchone()
+            self.assertEqual(row, ("hold", "hold", "hold", "consistent"))
 
     def test_source_attribution_must_match_dated_news(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -89,23 +89,31 @@ class UsPaperEngine:
 
         logger.info("run_start execution_date=%s analysis_count=%s bars=%s", execution_date, analysis_count, len(bars))
 
-        for signal, advice in self.reader.s1_conflicts(execution_date):
+        held_symbols = self._held_symbols()
+        for signal, advice in self.reader.s1_conflicts(execution_date, held_symbols=held_symbols):
             stats["s1_conflicts"] += 1
             self.ledger.record_event(
                 signal_id=signal.id,
                 stock_code=signal.stock_code,
                 event_date=execution_date,
                 event_type="s1_conflict_skip",
-                reason="advice_signal_action_mismatch",
+                reason=advice.conflict_status,
                 details={
                     "signal_action": signal.action,
                     "advice_action": advice.action,
                     "operation_advice": advice.operation_advice,
                     "source_report_id": advice.report_id,
+                    "flat_account_action": advice.flat_account_action,
+                    "holding_action": advice.holding_action,
+                    "resolved_action": advice.resolved_action,
+                    "conflict_status": advice.conflict_status,
+                    "conflict_reason": advice.conflict_reason,
+                    "intent_source": advice.intent_source,
+                    "has_position": signal.stock_code in held_symbols,
                 },
             )
 
-        open_candidates = self.reader.open_candidates(execution_date)
+        open_candidates = self.reader.open_candidates(execution_date, held_symbols=held_symbols)
         stats["open_candidates"] = len(open_candidates)
         self._record_data_gaps(execution_date, bars, stats)
 
@@ -319,7 +327,7 @@ class UsPaperEngine:
         logger: logging.Logger,
         stats: Dict[str, int],
     ) -> None:
-        candidates = self.reader.exit_candidates(execution_date)
+        candidates = self.reader.exit_candidates(execution_date, held_symbols=self._held_symbols())
         stats["exit_candidates"] = len(candidates)
         for signal in candidates:
             position = self.ledger.position(signal.stock_code)
@@ -425,6 +433,9 @@ class UsPaperEngine:
             mark = bar.close if bar is not None and bar.close is not None else position["avg_cost"]
             value += float(mark) * int(position["quantity"])
         return value
+
+    def _held_symbols(self) -> set[str]:
+        return {str(position["stock_code"]) for position in self.ledger.positions()}
 
 
 def main() -> None:

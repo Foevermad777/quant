@@ -177,6 +177,11 @@ def load_signal_stats(reader: UsSignalReader, config: UsExecutorConfig, start: d
                 "signal_action": signal.action,
                 "advice_action": advice.action,
                 "operation_advice": advice.operation_advice,
+                "conflict_status": advice.conflict_status,
+                "conflict_reason": advice.conflict_reason,
+                "flat_account_action": advice.flat_account_action,
+                "holding_action": advice.holding_action,
+                "resolved_action": advice.resolved_action,
             }
         )
     return stats
@@ -590,7 +595,7 @@ def _render_s1_conflicts(conflicts: Sequence[Dict[str, Any]]) -> str:
     if not conflicts:
         return "- S1 conflicts: none detected among active prior US signals."
     items = [
-        f"{item['stock_code']} signal_id={item['signal_id']} signal={item['signal_action']} advice={item['advice_action']} text={item['operation_advice']}"
+        f"{item['stock_code']} signal_id={item['signal_id']} reason={item.get('conflict_status', 'unknown')} signal={item['signal_action']} resolved={item.get('resolved_action', item['advice_action'])} flat={item.get('flat_account_action', 'unknown')} holding={item.get('holding_action', 'unknown')} text={item['operation_advice']}"
         for item in conflicts[:10]
     ]
     suffix = f" (+{len(conflicts) - 10} more)" if len(conflicts) > 10 else ""

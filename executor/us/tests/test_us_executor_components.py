@@ -279,6 +279,42 @@ class UsPaperEngineTests(unittest.TestCase):
             self.assertEqual(stats["open_candidates"], 1)
             self.assertEqual(stats["filled"], 1)
 
+    def test_conditional_entry_records_specific_s1_reason_and_does_not_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "空仓者可逢低，等待回踩后分批建仓", "2026-07-07 12:00:00")
+                _insert_signal(conn, 1, "AAPL", "buy", 1)
+                _insert_bar(conn, "AAPL", "2026-07-08", 30.0, 29.5, 31.0)
+
+            config = UsExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                disciplined_db_path=ledger_path,
+                stock_pool=("AAPL",),
+                commission_per_share=0.0,
+                commission_rate=0.0,
+                min_commission=0.0,
+                sec_fee_rate=0.0,
+                slippage_rate=0.0,
+            )
+            engine = UsPaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 8))
+
+            self.assertEqual(stats["s1_conflicts"], 1)
+            self.assertEqual(stats["open_candidates"], 0)
+            self.assertEqual(stats["filled"], 0)
+            with engine.ledger._connect() as conn:
+                event = conn.execute(
+                    "select reason, details_json from signal_events where event_type = 's1_conflict_skip'"
+                ).fetchone()
+            details = json.loads(event["details_json"])
+            self.assertEqual(event["reason"], "conditional_entry")
+            self.assertEqual(details["resolved_action"], "watch")
+
     def test_big_gap_open_still_fills_and_same_day_stop_sells_t0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dsa_path = Path(tmpdir) / "dsa.db"

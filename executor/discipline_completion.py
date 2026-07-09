@@ -27,6 +27,7 @@ from executor.config import (
     PAPER_DB_PATH,
 )
 from executor.guardrails import GuardrailResult, gate_dsa_output
+from executor.intent_resolution import normalize_action, resolve_intent
 from executor.signal_reader import parse_datetime
 
 
@@ -55,6 +56,13 @@ DISCIPLINED_TEMPORAL_COLUMNS = {
     "data_asof": "text",
     "bar_cutoff": "text",
     "news_cutoff": "text",
+}
+DISCIPLINED_INTENT_COLUMNS = {
+    "flat_account_action": "text",
+    "holding_action": "text",
+    "resolved_action": "text",
+    "conflict_status": "text",
+    "conflict_reason": "text",
 }
 
 
@@ -141,6 +149,23 @@ DISCIPLINE_RESPONSE_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number"},
         "confidence_rationale": {"type": "string"},
         "single_side_flag": {"type": "boolean"},
+        "flat_account_action": {
+            "type": "string",
+            "enum": ["buy", "add", "sell", "reduce", "avoid", "hold", "watch", "alert"],
+        },
+        "holding_action": {
+            "type": "string",
+            "enum": ["buy", "add", "sell", "reduce", "avoid", "hold", "watch", "alert"],
+        },
+        "resolved_action": {
+            "type": "string",
+            "enum": ["buy", "add", "sell", "reduce", "avoid", "hold", "watch", "alert"],
+        },
+        "conflict_status": {
+            "type": "string",
+            "enum": ["hard_conflict", "conditional_entry", "position_context_split", "consistent"],
+        },
+        "conflict_reason": {"type": "string"},
         "normalized_terms": {
             "type": "array",
             "items": {
@@ -160,6 +185,11 @@ DISCIPLINE_RESPONSE_SCHEMA: dict[str, Any] = {
         "confidence",
         "confidence_rationale",
         "single_side_flag",
+        "flat_account_action",
+        "holding_action",
+        "resolved_action",
+        "conflict_status",
+        "conflict_reason",
     ],
 }
 
@@ -366,6 +396,11 @@ class DisciplinedSignalStore:
                         source_attribution_json text not null,
                         confidence_rationale text,
                         single_side_flag integer not null,
+                        flat_account_action text,
+                        holding_action text,
+                        resolved_action text,
+                        conflict_status text,
+                        conflict_reason text,
                         normalized_terms_json text,
                         completion_payload_json text not null,
                         raw_dsa_signal_json text not null,
@@ -387,6 +422,7 @@ class DisciplinedSignalStore:
                     """
                 )
                 ensure_disciplined_temporal_columns(conn)
+                ensure_disciplined_intent_columns(conn)
             self._initialized = True
 
     def get(self, source_signal_id: int) -> Optional[sqlite3.Row]:
@@ -451,6 +487,11 @@ class DisciplinedSignalStore:
             "source_attribution_json": _json_dumps(completion_payload["source_attribution"]),
             "confidence_rationale": completion_payload.get("confidence_rationale"),
             "single_side_flag": 1 if completion_payload.get("single_side_flag") else 0,
+            "flat_account_action": completion_payload.get("flat_account_action"),
+            "holding_action": completion_payload.get("holding_action"),
+            "resolved_action": completion_payload.get("resolved_action"),
+            "conflict_status": completion_payload.get("conflict_status"),
+            "conflict_reason": completion_payload.get("conflict_reason"),
             "normalized_terms_json": _json_dumps(completion_payload.get("normalized_terms") or []),
             "completion_payload_json": _json_dumps(completion_payload),
             "raw_dsa_signal_json": _json_dumps(context.signal),
@@ -952,6 +993,10 @@ def build_completion_prompt(context: CompletionContext, discipline_skill_path: P
             "4. scenarios must contain base, bull, and bear, each with assumptions, triggers, key_risks, and probability.",
             "5. If evidence is thin, lower confidence and describe the gap in confidence_rationale.",
             "6. If the DSA text is one-sided, set single_side_flag=true and lower confidence.",
+            "7. Resolve execution intent separately for a flat account and an existing holder.",
+            "8. Use flat_account_action for accounts with no current position, holding_action for accounts already holding the symbol, and resolved_action as the default flat-account execution action.",
+            "9. If text says holders should hold but flat accounts should wait for a pullback, return flat_account_action=watch, holding_action=hold, resolved_action=watch, conflict_status=position_context_split.",
+            "10. If text explicitly says watch/wait/do not buy while DSA action is buy/add, use conflict_status=hard_conflict. If text says buy only on dips/pullback/staged entry, use conflict_status=conditional_entry and do not make resolved_action buy.",
             "",
             "Discipline framework text:",
             discipline_text,
@@ -977,6 +1022,17 @@ def normalize_completion_payload(payload: Mapping[str, Any], context: Completion
     normalized["scenarios"] = normalized.get("scenarios") or {}
     normalized["confidence_rationale"] = str(normalized.get("confidence_rationale") or "").strip()
     normalized["single_side_flag"] = bool(normalized.get("single_side_flag"))
+    resolution = resolve_intent(
+        signal_action=context.signal.get("action"),
+        operation_advice=_analysis_intent_text(context.analysis),
+        metadata=normalized,
+        has_position=False,
+    )
+    normalized["flat_account_action"] = normalize_action(resolution.flat_account_action)
+    normalized["holding_action"] = normalize_action(resolution.holding_action)
+    normalized["resolved_action"] = normalize_action(resolution.resolved_action)
+    normalized["conflict_status"] = resolution.conflict_status
+    normalized["conflict_reason"] = resolution.conflict_reason
     normalized["normalized_terms"] = normalized.get("normalized_terms") or []
     return normalized
 
@@ -1033,6 +1089,15 @@ def _analysis_prompt_fields(analysis: Mapping[str, Any]) -> dict[str, Any]:
         "created_at",
     )
     return {key: analysis.get(key) for key in keys}
+
+
+def _analysis_intent_text(analysis: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("operation_advice", "analysis_summary", "trend_prediction"):
+        value = analysis.get(key)
+        if value:
+            parts.append(str(value))
+    return "\n".join(parts)
 
 
 def _normalize_source_attribution(items: Any, dated_news: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
@@ -1278,6 +1343,13 @@ def ensure_disciplined_temporal_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"alter table disciplined_signals add column {column} {column_type}")
 
 
+def ensure_disciplined_intent_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("pragma table_info(disciplined_signals)").fetchall()}
+    for column, column_type in DISCIPLINED_INTENT_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"alter table disciplined_signals add column {column} {column_type}")
+
+
 def backfill_disciplined_temporal_metadata(db_path: Path) -> tuple[int, int]:
     path = Path(db_path)
     if not path.exists():
@@ -1290,6 +1362,7 @@ def backfill_disciplined_temporal_metadata(db_path: Path) -> tuple[int, int]:
         if table is None:
             return 0, 0
         ensure_disciplined_temporal_columns(conn)
+        ensure_disciplined_intent_columns(conn)
         rows = conn.execute(
             """
             select source_signal_id, raw_dsa_signal_json, dsa_analysis_json

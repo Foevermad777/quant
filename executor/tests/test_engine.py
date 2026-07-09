@@ -146,6 +146,7 @@ class EngineTests(unittest.TestCase):
             with engine.ledger._connect() as conn:
                 events = conn.execute("select event_type, reason, details_json from signal_events order by id").fetchall()
             self.assertEqual([row["event_type"] for row in events], ["s1_conflict_skip", "data_gap"])
+            self.assertEqual(events[0]["reason"], "hard_conflict")
             self.assertEqual(events[1]["reason"], "missing_stock_daily_bars_for_pool")
             self.assertIn("600519", events[1]["details_json"])
 
@@ -158,6 +159,37 @@ class EngineTests(unittest.TestCase):
             with engine.ledger._connect() as conn:
                 events = conn.execute("select event_type from signal_events order by id").fetchall()
             self.assertEqual([row["event_type"] for row in events], ["s1_conflict_skip"])
+
+    def test_conditional_entry_records_specific_s1_reason_and_does_not_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-05 12:00:00")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+                _insert_bar(conn, "600900", "2026-07-06", 10.0, 10.5)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600900",),
+            )
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["s1_conflicts"], 1)
+            self.assertEqual(stats["open_candidates"], 0)
+            self.assertEqual(stats["filled"], 0)
+            with engine.ledger._connect() as conn:
+                event = conn.execute(
+                    "select reason, details_json from signal_events where event_type = 's1_conflict_skip'"
+                ).fetchone()
+            details = json.loads(event["details_json"])
+            self.assertEqual(event["reason"], "conditional_entry")
+            self.assertEqual(details["resolved_action"], "watch")
+            self.assertEqual(details["flat_account_action"], "watch")
 
     def _run_exit_signal(self, action: str, advice: str) -> tuple[dict, sqlite3.Row]:
         tmpdir = tempfile.TemporaryDirectory()
