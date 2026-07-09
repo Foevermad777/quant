@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Quant Runtime Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Quant Runtime Dashboard</h1>
+        <p id="subtitle">--</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshBtn" type="button">刷新</button>
+        <button id="autoBtn" type="button" aria-pressed="true">自动 5s</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="metric-grid" id="metricGrid"></section>
+
+      <section class="split">
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>扫盘分析</h2>
+            <span id="scanStamp" class="stamp">--</span>
+          </div>
+          <div class="status-strip" id="signalStrip"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>标的</th>
+                  <th>市场</th>
+                  <th>动作</th>
+                  <th>分数</th>
+                  <th>质量</th>
+                  <th>状态</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody id="signalsTable"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>最新分析池</h2>
+            <span id="analysisStamp" class="stamp">--</span>
+          </div>
+          <div class="pool-board" id="analysisPool"></div>
+        </article>
+      </section>
+
+      <section class="executor-grid">
+        <article class="panel executor-panel" data-market="cn">
+          <div class="panel-heading">
+            <h2>A股执行器</h2>
+            <span id="cnActivity" class="stamp">--</span>
+          </div>
+          <canvas id="cnChart" class="chart" height="180"></canvas>
+          <div class="executor-body" id="cnExecutor"></div>
+        </article>
+
+        <article class="panel executor-panel" data-market="us">
+          <div class="panel-heading">
+            <h2>美股执行器</h2>
+            <span id="usActivity" class="stamp">--</span>
+          </div>
+          <canvas id="usChart" class="chart" height="180"></canvas>
+          <div class="executor-body" id="usExecutor"></div>
+        </article>
+      </section>
+
+      <section class="split">
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>执行事件</h2>
+            <span class="stamp">latest</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>市场</th>
+                  <th>日期</th>
+                  <th>标的</th>
+                  <th>事件</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="eventsTable"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>日志尾部</h2>
+            <span id="logStamp" class="stamp">--</span>
+          </div>
+          <div class="log-grid" id="logGrid"></div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
