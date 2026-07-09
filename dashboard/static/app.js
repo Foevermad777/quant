@@ -52,6 +52,7 @@ async function loadOverview() {
 function render(data) {
   document.getElementById("subtitle").textContent = `${data.project_root} · ${data.generated_at}`;
   renderMetrics(data);
+  renderMarketReviews(data.scan);
   renderScan(data.scan);
   renderAnalysisPool(data.scan);
   renderExecutor("cn", data.executors.cn);
@@ -90,6 +91,29 @@ function renderMetrics(data) {
   document.getElementById("metricGrid").innerHTML = metrics
     .map((item) => `<article class="metric"><small>${escapeHtml(item.label)}</small><strong>${escapeHtml(String(item.value))}</strong><span>${escapeHtml(item.detail)}</span></article>`)
     .join("");
+}
+
+function renderMarketReviews(scan) {
+  const reviews = scan.market_reviews || [];
+  document.getElementById("marketReviewStamp").textContent = reviews.length ? formatTime(reviews[0].created_at) : "--";
+  document.getElementById("marketReviewGrid").innerHTML = reviews.length
+    ? reviews
+        .slice(0, 3)
+        .map((row, index) => `
+          <article class="market-review ${index === 0 ? "latest" : ""}">
+            <header>
+              <strong>${escapeHtml(row.name || row.code || "MARKET")}</strong>
+              <span class="pill">${escapeHtml(row.operation_advice || "--")}</span>
+            </header>
+            <div class="review-meta">
+              <span>分数 ${escapeHtml(row.sentiment_score ?? "--")}</span>
+              <span>${escapeHtml(formatTime(row.created_at))}</span>
+            </div>
+            <p>${escapeHtml(row.analysis_summary || "暂无复盘摘要")}</p>
+          </article>
+        `)
+        .join("")
+    : `<p class="empty">暂无大盘复盘</p>`;
 }
 
 function renderScan(scan) {

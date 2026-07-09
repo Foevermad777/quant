@@ -201,6 +201,7 @@ class DashboardDataTests(unittest.TestCase):
 
             self.assertEqual(overview["scan"]["counts"]["analysis_history"], 2)
             self.assertEqual(overview["scan"]["counts"]["active_signals"], 1)
+            self.assertEqual(overview["scan"]["market_reviews"][0]["code"], "MARKET")
             self.assertEqual(overview["scan"]["pool_analysis"]["cn"][0]["code"], "600519")
             self.assertEqual(overview["executors"]["cn"]["latest_snapshot"]["total_value"], 1005000)
             self.assertAlmostEqual(overview["executors"]["cn"]["return_rate"], 0.005)
@@ -219,4 +220,3 @@ class DashboardDataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
