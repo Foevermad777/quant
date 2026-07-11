@@ -14,6 +14,7 @@ US_DSA_ISOLATE_STOCKS="${US_DSA_ISOLATE_STOCKS:-1}"
 US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS="${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS:-1200}"
 US_DSA_ALERT_ON_ZERO_SUCCESS="${US_DSA_ALERT_ON_ZERO_SUCCESS:-1}"
 US_DSA_SKIP_PROXY_CHECK="${US_DSA_SKIP_PROXY_CHECK:-0}"
+US_DSA_FORCE_RUN="${US_DSA_FORCE_RUN:-1}"
 CAFFEINATE_BIN="${CAFFEINATE_BIN:-/usr/bin/caffeinate}"
 PYTHON_BIN="${PYTHON_BIN:-${DSA_DIR}/.venv/bin/python}"
 DSA_MAIN="${DSA_MAIN:-${DSA_DIR}/main.py}"
@@ -108,10 +109,16 @@ run_with_timeout() {
 run_dsa_main() {
   local stock_arg="${1}"
   shift
+  local args=("--stocks" "${stock_arg}")
+  if [[ "${US_DSA_FORCE_RUN}" == "1" ]]; then
+    args+=("--force-run")
+  fi
+  args+=("$@")
+
   if [[ -n "${CAFFEINATE_BIN}" ]]; then
-    "${CAFFEINATE_BIN}" -i "${PYTHON_BIN}" "${DSA_MAIN}" --stocks "${stock_arg}" "$@"
+    "${CAFFEINATE_BIN}" -i "${PYTHON_BIN}" "${DSA_MAIN}" "${args[@]}"
   else
-    "${PYTHON_BIN}" "${DSA_MAIN}" --stocks "${stock_arg}" "$@"
+    "${PYTHON_BIN}" "${DSA_MAIN}" "${args[@]}"
   fi
 }
 
@@ -144,7 +151,7 @@ write_status() {
 }
 
 run_batch_mode() {
-  log "proxy_check=ok action=start_us_daily_run mode=batch stocks=${US_STOCKS} log=${US_DSA_LOG}"
+  log "proxy_check=ok action=start_us_daily_run mode=batch stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} log=${US_DSA_LOG}"
   if run_dsa_main "${US_STOCKS}" >> "${US_DSA_LOG}" 2>&1; then
     local success_count
     local failure_count
@@ -182,7 +189,7 @@ run_isolated_mode() {
   local final_exit=0
 
   IFS=',' read -r -a stocks <<< "${US_STOCKS}"
-  log "proxy_check=ok action=start_us_daily_run mode=isolated stocks=${US_STOCKS} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
+  log "proxy_check=ok action=start_us_daily_run mode=isolated stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
   : > "${US_DSA_LOG}"
 
   for stock in "${stocks[@]}"; do
