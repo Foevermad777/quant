@@ -11,6 +11,8 @@ US_DSA_LOG="${LOG_DIR}/us_dsa_daily_${RUN_DATE}.log"
 US_DSA_STATUS="${LOG_DIR}/us_dsa_daily_status_${RUN_DATE}.json"
 US_DSA_PREFLIGHT_LOG="${LOG_DIR}/us_dsa_preflight_${RUN_DATE}.log"
 US_DSA_PREFLIGHT_STATUS="${LOG_DIR}/us_dsa_preflight_status_${RUN_DATE}.json"
+US_DSA_MARKET_CONTEXT_LOG="${LOG_DIR}/us_dsa_market_context_${RUN_DATE}.log"
+US_DSA_MARKET_CONTEXT_STATUS="${LOG_DIR}/us_dsa_market_context_status_${RUN_DATE}.json"
 US_STOCKS="${US_STOCKS:-AAPL,NVDA,MSFT,JPM,SPCX}"
 US_DSA_ISOLATE_STOCKS="${US_DSA_ISOLATE_STOCKS:-1}"
 US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS="${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS:-1200}"
@@ -23,12 +25,20 @@ US_DSA_PREFLIGHT_TIMEOUT_SECONDS="${US_DSA_PREFLIGHT_TIMEOUT_SECONDS:-12}"
 US_DSA_PREFLIGHT_SYMBOL="${US_DSA_PREFLIGHT_SYMBOL:-AAPL}"
 US_DSA_PREFLIGHT_PROXY_HOST="${US_DSA_PREFLIGHT_PROXY_HOST:-127.0.0.1}"
 US_DSA_PREFLIGHT_PROXY_PORT="${US_DSA_PREFLIGHT_PROXY_PORT:-7890}"
+US_DSA_MARKET_CONTEXT_TIMEOUT_SECONDS="${US_DSA_MARKET_CONTEXT_TIMEOUT_SECONDS:-1200}"
+US_DSA_MARKET_CONTEXT_FORCE_REFRESH="${US_DSA_MARKET_CONTEXT_FORCE_REFRESH:-0}"
+US_DSA_MARKET_CONTEXT_NOTIFY="${US_DSA_MARKET_CONTEXT_NOTIFY:-0}"
 US_DSA_PREFLIGHT_RUNTIME_STATUS="not_run"
 US_DSA_PROXY_RUNTIME_STATUS="not_checked"
+US_DSA_MARKET_CONTEXT_RUNTIME_STATUS="not_run"
+US_DSA_MARKET_CONTEXT_ACTION="none"
+US_DSA_MARKET_CONTEXT_QUERY_ID=""
+US_DSA_MARKET_CONTEXT_HISTORY_ID=""
 CAFFEINATE_BIN="${CAFFEINATE_BIN:-/usr/bin/caffeinate}"
 PYTHON_BIN="${PYTHON_BIN:-${DSA_DIR}/.venv/bin/python}"
 DSA_MAIN="${DSA_MAIN:-${DSA_DIR}/main.py}"
 US_DSA_PREFLIGHT_SCRIPT="${US_DSA_PREFLIGHT_SCRIPT:-${PROJECT_DIR}/ops/us_dsa_preflight.py}"
+US_DSA_MARKET_CONTEXT_SCRIPT="${US_DSA_MARKET_CONTEXT_SCRIPT:-${PROJECT_DIR}/ops/prepare_dsa_market_context.py}"
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -131,7 +141,12 @@ run_with_timeout() {
 run_dsa_main() {
   local stock_arg="${1}"
   shift
-  local args=("--stocks" "${stock_arg}")
+  local args=(
+    "--stocks" "${stock_arg}"
+    "--no-market-review"
+    "--reuse-market-context"
+    "--market-context-query-id" "${US_DSA_MARKET_CONTEXT_QUERY_ID}"
+  )
   if [[ "${US_DSA_FORCE_RUN}" == "1" ]]; then
     args+=("--force-run")
   fi
@@ -161,7 +176,7 @@ write_status() {
   local total_count="${4}"
   local exit_code="${5}"
 
-  printf '{"status":"%s","success":%s,"failed":%s,"total":%s,"exit_code":%s,"proxy":"%s","preflight":"%s","preflight_status_file":"%s","preflight_log":"%s","log":"%s","generated_at":"%s"}\n' \
+  printf '{"status":"%s","success":%s,"failed":%s,"total":%s,"exit_code":%s,"proxy":"%s","preflight":"%s","market_context":"%s","market_context_action":"%s","market_context_query_id":"%s","market_context_history_id":"%s","market_context_status_file":"%s","market_context_log":"%s","preflight_status_file":"%s","preflight_log":"%s","log":"%s","generated_at":"%s"}\n' \
     "${status}" \
     "${success_count}" \
     "${failure_count}" \
@@ -169,6 +184,12 @@ write_status() {
     "${exit_code}" \
     "${US_DSA_PROXY_RUNTIME_STATUS}" \
     "${US_DSA_PREFLIGHT_RUNTIME_STATUS}" \
+    "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" \
+    "${US_DSA_MARKET_CONTEXT_ACTION}" \
+    "${US_DSA_MARKET_CONTEXT_QUERY_ID}" \
+    "${US_DSA_MARKET_CONTEXT_HISTORY_ID}" \
+    "${US_DSA_MARKET_CONTEXT_STATUS}" \
+    "${US_DSA_MARKET_CONTEXT_LOG}" \
     "${US_DSA_PREFLIGHT_STATUS}" \
     "${US_DSA_PREFLIGHT_LOG}" \
     "${US_DSA_LOG}" \
@@ -278,8 +299,78 @@ run_provider_preflight() {
   log "action=select_us_dsa_routes llm=${selected_llm} market_data=${selected_market_data} news=${selected_news:-none}"
 }
 
+market_context_value() {
+  local field="${1}"
+  "${PYTHON_BIN}" -c \
+    'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); value=data.get(sys.argv[2]); print("" if value is None else value)' \
+    "${US_DSA_MARKET_CONTEXT_STATUS}" "${field}"
+}
+
+run_market_context() {
+  local context_exit=0
+  local total
+  local args=(
+    "${US_DSA_MARKET_CONTEXT_SCRIPT}"
+    "--region" "us"
+    "--output" "${US_DSA_MARKET_CONTEXT_STATUS}"
+    "--run-id" "us_dsa_${RUN_DATE}_$$"
+  )
+  if [[ "${US_DSA_MARKET_CONTEXT_FORCE_REFRESH}" == "1" ]]; then
+    args+=("--force-refresh")
+  fi
+  if [[ "${US_DSA_FORCE_RUN}" != "1" ]]; then
+    args+=("--skip-closed-market")
+  fi
+  if [[ "${US_DSA_MARKET_CONTEXT_NOTIFY}" == "1" ]]; then
+    args+=("--notify")
+  fi
+
+  : > "${US_DSA_MARKET_CONTEXT_LOG}"
+  log "action=start_us_market_context region=us log=${US_DSA_MARKET_CONTEXT_LOG}"
+  set +e
+  run_with_timeout "${US_DSA_MARKET_CONTEXT_TIMEOUT_SECONDS}" \
+    "${PYTHON_BIN}" "${args[@]}" >> "${US_DSA_MARKET_CONTEXT_LOG}" 2>&1
+  context_exit=$?
+  set -e
+
+  if [[ -f "${US_DSA_MARKET_CONTEXT_STATUS}" ]]; then
+    US_DSA_MARKET_CONTEXT_RUNTIME_STATUS="$(market_context_value status 2>/dev/null || printf 'blocked')"
+    US_DSA_MARKET_CONTEXT_ACTION="$(market_context_value action 2>/dev/null || printf 'unknown')"
+  else
+    US_DSA_MARKET_CONTEXT_RUNTIME_STATUS="blocked"
+    US_DSA_MARKET_CONTEXT_ACTION="missing_status"
+  fi
+  log "action=finish_us_market_context region=us status=${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS} action_detail=${US_DSA_MARKET_CONTEXT_ACTION} exit=${context_exit}"
+
+  if [[ "${context_exit}" != "0" ]]; then
+    total="$(count_stocks)"
+    write_status "alert" 0 "${total}" "${total}" "${context_exit}"
+    return "${context_exit}"
+  fi
+  if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" == "skipped" ]]; then
+    return 0
+  fi
+  if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" != "ok" ]]; then
+    total="$(count_stocks)"
+    write_status "alert" 0 "${total}" "${total}" 68
+    return 68
+  fi
+
+  US_DSA_MARKET_CONTEXT_QUERY_ID="$(market_context_value query_id)"
+  US_DSA_MARKET_CONTEXT_HISTORY_ID="$(market_context_value history_id)"
+  if [[ -z "${US_DSA_MARKET_CONTEXT_QUERY_ID}" || -z "${US_DSA_MARKET_CONTEXT_HISTORY_ID}" ]]; then
+    US_DSA_MARKET_CONTEXT_RUNTIME_STATUS="blocked"
+    US_DSA_MARKET_CONTEXT_ACTION="invalid_contract"
+    total="$(count_stocks)"
+    write_status "alert" 0 "${total}" "${total}" 68
+    return 68
+  fi
+  export US_DSA_MARKET_CONTEXT_QUERY_ID
+  log "action=select_us_market_context region=us query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} history_id=${US_DSA_MARKET_CONTEXT_HISTORY_ID}"
+}
+
 run_batch_mode() {
-  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=batch stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} log=${US_DSA_LOG}"
+  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=batch stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} log=${US_DSA_LOG}"
   if run_dsa_main "${US_STOCKS}" >> "${US_DSA_LOG}" 2>&1; then
     local success_count
     local failure_count
@@ -328,7 +419,7 @@ run_isolated_mode() {
   local final_exit=0
 
   IFS=',' read -r -a stocks <<< "${US_STOCKS}"
-  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=isolated stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
+  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=isolated stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
   : > "${US_DSA_LOG}"
 
   for stock in "${stocks[@]}"; do
@@ -341,13 +432,14 @@ run_isolated_mode() {
     total=$((total + 1))
     stock_log="${LOG_DIR}/us_dsa_daily_${RUN_DATE}_${stock}.log"
     : > "${stock_log}"
-    log "action=start_us_stock stock=${stock} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${stock_log}"
+    log "action=start_us_stock stock=${stock} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${stock_log}"
     {
-      printf '\n===== US DSA stock=%s start=%s =====\n' "${stock}" "$(timestamp)"
+      printf '\n===== US DSA stock=%s start=%s context_query_id=%s =====\n' \
+        "${stock}" "$(timestamp)" "${US_DSA_MARKET_CONTEXT_QUERY_ID}"
     } >> "${US_DSA_LOG}"
 
     if run_with_timeout "${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS}" \
-      run_dsa_main "${stock}" --no-market-review >> "${stock_log}" 2>&1; then
+      run_dsa_main "${stock}" >> "${stock_log}" 2>&1; then
       stock_exit=0
     else
       stock_exit=$?
@@ -428,10 +520,22 @@ load_tavily_keys
 load_bocha_keys
 load_deepseek_fallback
 export STOCK_LIST="${US_STOCKS}"
+export MARKET_REVIEW_REGION="us"
+export DAILY_MARKET_CONTEXT_ENABLED="true"
 if run_provider_preflight; then
   :
 else
   exit $?
+fi
+if run_market_context; then
+  :
+else
+  exit $?
+fi
+if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" == "skipped" ]]; then
+  write_status "skipped" 0 0 "$(count_stocks)" 0
+  log "action=finish_us_daily_run status=skipped reason=market_closed"
+  exit 0
 fi
 
 cd "${DSA_DIR}"
