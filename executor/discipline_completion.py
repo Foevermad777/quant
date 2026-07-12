@@ -665,9 +665,13 @@ class OpenAICompatibleStructuredClient:
             },
             method="POST",
         )
+        # DeepSeek is reachable directly from the mainland; sharing Gemini's
+        # proxy egress took the fallback down together with the primary on
+        # 2026-07-09, so bypass HTTP(S)_PROXY env for this provider.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         start = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

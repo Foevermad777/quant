@@ -53,12 +53,10 @@ def classify_http_failure(provider: str, status: int, body: str) -> str:
     return "http_error"
 
 
-def select_routes(probes: Mapping[str, ProbeResult]) -> RouteDecision:
+def select_routes(probes: Mapping[str, ProbeResult], region: str = "us") -> RouteDecision:
     reasons: list[str] = []
     gemini_ok = probes.get("gemini", ProbeResult("gemini", False, 0)).ok
     deepseek_ok = probes.get("deepseek", ProbeResult("deepseek", False, 0)).ok
-    yahoo_ok = probes.get("yahoo", ProbeResult("yahoo", False, 0)).ok
-    nasdaq_ok = probes.get("nasdaq", ProbeResult("nasdaq", False, 0)).ok
     tavily_ok = probes.get("tavily", ProbeResult("tavily", False, 0)).ok
     bocha_ok = probes.get("bocha", ProbeResult("bocha", False, 0)).ok
 
@@ -66,6 +64,34 @@ def select_routes(probes: Mapping[str, ProbeResult]) -> RouteDecision:
         reasons.append("gemini_unavailable")
     if not deepseek_ok:
         reasons.append("deepseek_unavailable")
+
+    llm = "gemini" if gemini_ok else "deepseek" if deepseek_ok else None
+
+    if region == "cn":
+        # CN market data comes from direct-connection domestic multi-source
+        # failover (efinance/akshare/tushare/tencent) and is not probed here;
+        # only the LLM route can zero out a CN day.
+        if not bocha_ok:
+            reasons.append("bocha_unavailable")
+        if not tavily_ok:
+            reasons.append("tavily_unavailable")
+        news = "bocha" if bocha_ok else "tavily" if tavily_ok else None
+        if llm is None:
+            reasons.append("no_usable_llm")
+        if news is None:
+            reasons.append("no_usable_news")
+        status = "blocked" if llm is None else "degraded" if reasons else "ok"
+        return RouteDecision(
+            status=status,
+            llm=llm,
+            market_data="domestic",
+            news=news,
+            reasons=tuple(reasons),
+        )
+
+    yahoo_ok = probes.get("yahoo", ProbeResult("yahoo", False, 0)).ok
+    nasdaq_ok = probes.get("nasdaq", ProbeResult("nasdaq", False, 0)).ok
+
     if not yahoo_ok:
         reasons.append("yahoo_unavailable")
     if not nasdaq_ok:
@@ -75,7 +101,6 @@ def select_routes(probes: Mapping[str, ProbeResult]) -> RouteDecision:
     if not bocha_ok:
         reasons.append("bocha_unavailable")
 
-    llm = "gemini" if gemini_ok else "deepseek" if deepseek_ok else None
     market_data = "yahoo" if yahoo_ok else "nasdaq" if nasdaq_ok else None
     news = "tavily" if tavily_ok else "bocha" if bocha_ok else None
 
@@ -360,16 +385,17 @@ def run_preflight(args: argparse.Namespace) -> tuple[dict, RouteDecision]:
             model=args.deepseek_model,
             timeout=args.timeout,
         ),
-        "yahoo": lambda: probe_yahoo(
+        "tavily": lambda: probe_tavily(tavily_key, symbol=args.symbol, timeout=args.timeout),
+        "bocha": lambda: probe_bocha(bocha_key, symbol=args.symbol, timeout=args.timeout),
+    }
+    if args.region == "us":
+        jobs["yahoo"] = lambda: probe_yahoo(
             args.symbol,
             proxy_host=args.proxy_host,
             proxy_port=args.proxy_port,
             timeout=args.timeout,
-        ),
-        "nasdaq": lambda: probe_nasdaq(args.symbol, timeout=args.timeout),
-        "tavily": lambda: probe_tavily(tavily_key, symbol=args.symbol, timeout=args.timeout),
-        "bocha": lambda: probe_bocha(bocha_key, symbol=args.symbol, timeout=args.timeout),
-    }
+        )
+        jobs["nasdaq"] = lambda: probe_nasdaq(args.symbol, timeout=args.timeout)
     probes: dict[str, ProbeResult] = {}
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
         futures = {pool.submit(job): name for name, job in jobs.items()}
@@ -380,7 +406,7 @@ def run_preflight(args: argparse.Namespace) -> tuple[dict, RouteDecision]:
             except Exception:
                 probes[name] = ProbeResult(name, False, 0, "internal_error")
 
-    decision = select_routes(probes)
+    decision = select_routes(probes, region=args.region)
     result = {
         "status": decision.status,
         "routes": {
@@ -390,6 +416,7 @@ def run_preflight(args: argparse.Namespace) -> tuple[dict, RouteDecision]:
         },
         "reasons": list(decision.reasons),
         "probes": {name: asdict(probes[name]) for name in sorted(probes)},
+        "region": args.region,
         "symbol": args.symbol,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -397,8 +424,9 @@ def run_preflight(args: argparse.Namespace) -> tuple[dict, RouteDecision]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Probe US DSA providers and select safe runtime routes.")
+    parser = argparse.ArgumentParser(description="Probe DSA providers and select safe runtime routes (CN or US track).")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--region", choices=("us", "cn"), default="us")
     parser.add_argument("--gemini-key-file", type=Path, default=SECRETS_DIR / "gemini_api_key.txt")
     parser.add_argument("--deepseek-key-file", type=Path, default=SECRETS_DIR / "deepseek_api_key.txt")
     parser.add_argument("--tavily-key-file", type=Path, default=SECRETS_DIR / "tavily_api_key.txt")
@@ -408,8 +436,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proxy-host", default="127.0.0.1")
     parser.add_argument("--proxy-port", type=int, default=7890)
     parser.add_argument("--timeout", type=float, default=12.0)
-    parser.add_argument("--symbol", default="AAPL")
-    return parser.parse_args()
+    parser.add_argument("--symbol", default=None, help="Probe symbol; defaults to AAPL (us) / 600519 (cn).")
+    args = parser.parse_args()
+    if args.symbol is None:
+        args.symbol = "AAPL" if args.region == "us" else "600519"
+    return args
 
 
 def main() -> int:

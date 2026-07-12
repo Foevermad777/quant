@@ -88,6 +88,9 @@ else:
                         "DSA_STOCKS": "600519,300750,601318,600036,600900",
                         "DSA_SKIP_PROXY_CHECK": "1",
                         "DSA_FORCE_RUN": "1",
+                        "DSA_PREFLIGHT_ENABLED": "0",
+                        "DSA_DB_VERIFY_ENABLED": "0",
+                        "DSA_ALERT_NOTIFY": "0",
                         "DSA_MARKET_CONTEXT_NOTIFY": "0",
                         "DSA_MARKET_CONTEXT_SCRIPT": str(context_script),
                     }
@@ -100,6 +103,8 @@ else:
                         "US_DSA_SKIP_PROXY_CHECK": "1",
                         "US_DSA_FORCE_RUN": "1",
                         "US_DSA_PREFLIGHT_ENABLED": "0",
+                        "US_DSA_DB_VERIFY_ENABLED": "0",
+                        "US_DSA_ALERT_NOTIFY": "0",
                         "US_DSA_MARKET_CONTEXT_NOTIFY": "0",
                         "US_DSA_MARKET_CONTEXT_SCRIPT": str(context_script),
                     }

@@ -6,13 +6,16 @@ DSA_DIR="${DSA_DIR:-${PROJECT_DIR}/vendor/daily_stock_analysis}"
 LOG_DIR="${PROJECT_DIR}/runtime_data/logs"
 SECRETS_DIR="${PROJECT_DIR}/runtime_data/secrets"
 LAUNCHER_LOG="${LOG_DIR}/us_dsa_daily_launcher.log"
+ALERTS_LOG="${LOG_DIR}/dsa_alerts.log"
 RUN_DATE="$(date "+%Y%m%d")"
+RUN_STARTED_AT="$(date "+%Y-%m-%d %H:%M:%S")"
 US_DSA_LOG="${LOG_DIR}/us_dsa_daily_${RUN_DATE}.log"
 US_DSA_STATUS="${LOG_DIR}/us_dsa_daily_status_${RUN_DATE}.json"
 US_DSA_PREFLIGHT_LOG="${LOG_DIR}/us_dsa_preflight_${RUN_DATE}.log"
 US_DSA_PREFLIGHT_STATUS="${LOG_DIR}/us_dsa_preflight_status_${RUN_DATE}.json"
 US_DSA_MARKET_CONTEXT_LOG="${LOG_DIR}/us_dsa_market_context_${RUN_DATE}.log"
 US_DSA_MARKET_CONTEXT_STATUS="${LOG_DIR}/us_dsa_market_context_status_${RUN_DATE}.json"
+US_DSA_DB_VERIFY_STATUS="${LOG_DIR}/us_dsa_db_verify_${RUN_DATE}.json"
 US_STOCKS="${US_STOCKS:-AAPL,NVDA,MSFT,JPM,SPCX}"
 US_DSA_ISOLATE_STOCKS="${US_DSA_ISOLATE_STOCKS:-1}"
 US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS="${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS:-1200}"
@@ -28,6 +31,14 @@ US_DSA_PREFLIGHT_PROXY_PORT="${US_DSA_PREFLIGHT_PROXY_PORT:-7890}"
 US_DSA_MARKET_CONTEXT_TIMEOUT_SECONDS="${US_DSA_MARKET_CONTEXT_TIMEOUT_SECONDS:-1200}"
 US_DSA_MARKET_CONTEXT_FORCE_REFRESH="${US_DSA_MARKET_CONTEXT_FORCE_REFRESH:-0}"
 US_DSA_MARKET_CONTEXT_NOTIFY="${US_DSA_MARKET_CONTEXT_NOTIFY:-0}"
+US_DSA_DB_VERIFY_ENABLED="${US_DSA_DB_VERIFY_ENABLED:-1}"
+US_DSA_RETRY_ON_MISSING="${US_DSA_RETRY_ON_MISSING:-1}"
+US_DSA_RETRY_DELAY_SECONDS="${US_DSA_RETRY_DELAY_SECONDS:-600}"
+US_DSA_ALERT_NOTIFY="${US_DSA_ALERT_NOTIFY:-1}"
+US_DSA_DB_PATH="${US_DSA_DB_PATH:-${PROJECT_DIR}/runtime_data/dsa/stock_analysis.db}"
+US_DSA_DB_VERIFIED_COUNT=""
+US_DSA_DB_MISSING=""
+US_DSA_RETRY_ROUNDS=0
 US_DSA_PREFLIGHT_RUNTIME_STATUS="not_run"
 US_DSA_PROXY_RUNTIME_STATUS="not_checked"
 US_DSA_MARKET_CONTEXT_RUNTIME_STATUS="not_run"
@@ -39,6 +50,7 @@ PYTHON_BIN="${PYTHON_BIN:-${DSA_DIR}/.venv/bin/python}"
 DSA_MAIN="${DSA_MAIN:-${DSA_DIR}/main.py}"
 US_DSA_PREFLIGHT_SCRIPT="${US_DSA_PREFLIGHT_SCRIPT:-${PROJECT_DIR}/ops/us_dsa_preflight.py}"
 US_DSA_MARKET_CONTEXT_SCRIPT="${US_DSA_MARKET_CONTEXT_SCRIPT:-${PROJECT_DIR}/ops/prepare_dsa_market_context.py}"
+US_DSA_VERIFY_SCRIPT="${US_DSA_VERIFY_SCRIPT:-${PROJECT_DIR}/ops/verify_dsa_analysis.py}"
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S %z"
@@ -46,6 +58,20 @@ timestamp() {
 
 log() {
   printf "%s %s\n" "$(timestamp)" "$*" >> "${LAUNCHER_LOG}"
+}
+
+send_alert() {
+  local title="${1}"
+  local message="${2}"
+  printf "%s market=us %s | %s\n" "$(timestamp)" "${title}" "${message}" >> "${ALERTS_LOG}"
+  log "action=alert market=us title=${title// /_} message=${message// /_}"
+  if [[ "${US_DSA_ALERT_NOTIFY}" == "1" ]]; then
+    /usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Basso"' \
+      -e 'end run' \
+      "${title}" "${message}" >/dev/null 2>&1 || true
+  fi
 }
 
 load_tavily_keys() {
@@ -176,7 +202,7 @@ write_status() {
   local total_count="${4}"
   local exit_code="${5}"
 
-  printf '{"status":"%s","success":%s,"failed":%s,"total":%s,"exit_code":%s,"proxy":"%s","preflight":"%s","market_context":"%s","market_context_action":"%s","market_context_query_id":"%s","market_context_history_id":"%s","market_context_status_file":"%s","market_context_log":"%s","preflight_status_file":"%s","preflight_log":"%s","log":"%s","generated_at":"%s"}\n' \
+  printf '{"status":"%s","success":%s,"failed":%s,"total":%s,"exit_code":%s,"proxy":"%s","preflight":"%s","market_context":"%s","market_context_action":"%s","market_context_query_id":"%s","market_context_history_id":"%s","market_context_status_file":"%s","market_context_log":"%s","preflight_status_file":"%s","preflight_log":"%s","db_verified":"%s","db_missing":"%s","retry_rounds":%s,"run_started_at":"%s","log":"%s","generated_at":"%s"}\n' \
     "${status}" \
     "${success_count}" \
     "${failure_count}" \
@@ -192,6 +218,10 @@ write_status() {
     "${US_DSA_MARKET_CONTEXT_LOG}" \
     "${US_DSA_PREFLIGHT_STATUS}" \
     "${US_DSA_PREFLIGHT_LOG}" \
+    "${US_DSA_DB_VERIFIED_COUNT}" \
+    "${US_DSA_DB_MISSING}" \
+    "${US_DSA_RETRY_ROUNDS}" \
+    "${RUN_STARTED_AT}" \
     "${US_DSA_LOG}" \
     "$(timestamp)" \
     > "${US_DSA_STATUS}"
@@ -246,6 +276,7 @@ run_provider_preflight() {
   set +e
   "${PYTHON_BIN}" "${US_DSA_PREFLIGHT_SCRIPT}" \
     --output "${US_DSA_PREFLIGHT_STATUS}" \
+    --region us \
     --gemini-key-file "${SECRETS_DIR}/gemini_api_key.txt" \
     --deepseek-key-file "${SECRETS_DIR}/deepseek_api_key.txt" \
     --tavily-key-file "${SECRETS_DIR}/tavily_api_key.txt" \
@@ -270,6 +301,7 @@ run_provider_preflight() {
     if [[ "${US_DSA_PREFLIGHT_FAIL_CLOSED}" == "1" ]]; then
       total="$(count_stocks)"
       write_status "alert" 0 "${total}" "${total}" "${preflight_exit}"
+      send_alert "DSA US preflight 阻断" "无可用 LLM/行情路由，今日 US 跑批中止（exit=${preflight_exit}）"
       return "${preflight_exit}"
     fi
     log "action=continue_us_dsa_after_preflight_failure fail_closed=0"
@@ -304,6 +336,108 @@ market_context_value() {
   "${PYTHON_BIN}" -c \
     'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); value=data.get(sys.argv[2]); print("" if value is None else value)' \
     "${US_DSA_MARKET_CONTEXT_STATUS}" "${field}"
+}
+
+db_verify_value() {
+  local field="${1}"
+  "${PYTHON_BIN}" -c \
+    'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+value = data.get(sys.argv[2])
+if isinstance(value, list):
+    print(",".join(str(item) for item in value))
+elif value is None:
+    print("")
+else:
+    print(value)' \
+    "${US_DSA_DB_VERIFY_STATUS}" "${field}"
+}
+
+run_db_verify() {
+  local verify_exit=0
+  local analyzed_value=""
+  local missing_value=""
+  set +e
+  "${PYTHON_BIN}" "${US_DSA_VERIFY_SCRIPT}" \
+    --db "${US_DSA_DB_PATH}" \
+    --stocks "${US_STOCKS}" \
+    --since "${RUN_STARTED_AT}" \
+    --output "${US_DSA_DB_VERIFY_STATUS}" >> "${US_DSA_LOG}" 2>&1
+  verify_exit=$?
+  set -e
+  if [[ "${verify_exit}" != "0" && "${verify_exit}" != "3" ]]; then
+    log "action=db_verify market=us status=error exit=${verify_exit}"
+    return 1
+  fi
+  if ! analyzed_value="$(db_verify_value analyzed_count)"; then
+    log "action=db_verify market=us status=readback_error field=analyzed_count"
+    return 1
+  fi
+  if ! missing_value="$(db_verify_value missing)"; then
+    log "action=db_verify market=us status=readback_error field=missing"
+    return 1
+  fi
+  if [[ "${verify_exit}" == "3" && -z "${missing_value}" ]]; then
+    log "action=db_verify market=us status=inconsistent exit=3 missing_readback=empty"
+    return 1
+  fi
+  US_DSA_DB_VERIFIED_COUNT="${analyzed_value}"
+  US_DSA_DB_MISSING="${missing_value}"
+  log "action=db_verify market=us status=done verified=${US_DSA_DB_VERIFIED_COUNT} missing=${US_DSA_DB_MISSING:-none} since=${RUN_STARTED_AT}"
+  return 0
+}
+
+finalize_run() {
+  local mode_exit="${1}"
+  local total
+  local success
+  local failed
+  local status
+  total="$(count_stocks)"
+
+  if [[ "${US_DSA_DB_VERIFY_ENABLED}" != "1" ]]; then
+    exit "${mode_exit}"
+  fi
+
+  if ! run_db_verify; then
+    write_status "alert" 0 "${total}" "${total}" 72
+    send_alert "DSA US 校验层异常" "无法核对 analysis_history，DB 真值未知（mode_exit=${mode_exit}），需人工检查"
+    exit 72
+  fi
+
+  if [[ -n "${US_DSA_DB_MISSING}" && "${US_DSA_RETRY_ON_MISSING}" == "1" ]]; then
+    US_DSA_RETRY_ROUNDS=1
+    send_alert "DSA US 首轮缺口" "missing=${US_DSA_DB_MISSING}，${US_DSA_RETRY_DELAY_SECONDS}s 后自动重试一轮"
+    log "action=schedule_retry market=us missing=${US_DSA_DB_MISSING} delay_seconds=${US_DSA_RETRY_DELAY_SECONDS}"
+    if [[ -n "${CAFFEINATE_BIN}" ]]; then
+      "${CAFFEINATE_BIN}" -i /bin/sleep "${US_DSA_RETRY_DELAY_SECONDS}" || /bin/sleep "${US_DSA_RETRY_DELAY_SECONDS}" || true
+    else
+      /bin/sleep "${US_DSA_RETRY_DELAY_SECONDS}" || true
+    fi
+    run_isolated_mode "${US_DSA_DB_MISSING}" 2 || true
+    if ! run_db_verify; then
+      write_status "alert" 0 "${total}" "${total}" 72
+      send_alert "DSA US 校验层异常" "重试后无法核对 analysis_history，DB 真值未知，需人工检查"
+      exit 72
+    fi
+  fi
+
+  success="${US_DSA_DB_VERIFIED_COUNT:-0}"
+  if [[ -n "${US_DSA_DB_MISSING}" ]]; then
+    failed=$((total - success))
+    write_status "alert" "${success}" "${failed}" "${total}" 70
+    send_alert "DSA US 当日分析缺口" "missing=${US_DSA_DB_MISSING} success=${success}/${total}，重试 ${US_DSA_RETRY_ROUNDS} 轮后仍缺，需人工介入"
+    log "action=finish_us_daily_run status=alert reason=db_missing missing=${US_DSA_DB_MISSING} success=${success} total=${total} retry_rounds=${US_DSA_RETRY_ROUNDS}"
+    exit 70
+  fi
+
+  status="ok"
+  if [[ "${US_DSA_RETRY_ROUNDS}" != "0" || "${mode_exit}" != "0" || "${US_DSA_PREFLIGHT_RUNTIME_STATUS}" == "degraded" ]]; then
+    status="degraded"
+  fi
+  write_status "${status}" "${success}" 0 "${total}" 0
+  log "action=finish_us_daily_run status=${status} source=db_verify success=${success} total=${total} retry_rounds=${US_DSA_RETRY_ROUNDS}"
+  exit 0
 }
 
 run_market_context() {
@@ -345,6 +479,7 @@ run_market_context() {
   if [[ "${context_exit}" != "0" ]]; then
     total="$(count_stocks)"
     write_status "alert" 0 "${total}" "${total}" "${context_exit}"
+    send_alert "DSA US 大盘上下文失败" "context exit=${context_exit}，今日 US 跑批中止，需人工介入"
     return "${context_exit}"
   fi
   if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" == "skipped" ]]; then
@@ -353,6 +488,7 @@ run_market_context() {
   if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" != "ok" ]]; then
     total="$(count_stocks)"
     write_status "alert" 0 "${total}" "${total}" 68
+    send_alert "DSA US 大盘上下文异常" "status=${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS} action=${US_DSA_MARKET_CONTEXT_ACTION}，今日 US 跑批中止"
     return 68
   fi
 
@@ -363,6 +499,7 @@ run_market_context() {
     US_DSA_MARKET_CONTEXT_ACTION="invalid_contract"
     total="$(count_stocks)"
     write_status "alert" 0 "${total}" "${total}" 68
+    send_alert "DSA US 大盘上下文契约异常" "query_id/history_id 缺失，今日 US 跑批中止"
     return 68
   fi
   export US_DSA_MARKET_CONTEXT_QUERY_ID
@@ -405,6 +542,8 @@ run_batch_mode() {
 }
 
 run_isolated_mode() {
+  local stocks_csv="${1:-${US_STOCKS}}"
+  local round="${2:-1}"
   local stocks=()
   local stock
   local normalized_stock
@@ -418,9 +557,8 @@ run_isolated_mode() {
   local status="ok"
   local final_exit=0
 
-  IFS=',' read -r -a stocks <<< "${US_STOCKS}"
-  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=isolated stocks=${US_STOCKS} force_run=${US_DSA_FORCE_RUN} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
-  : > "${US_DSA_LOG}"
+  IFS=',' read -r -a stocks <<< "${stocks_csv}"
+  log "proxy_check=${US_DSA_PROXY_RUNTIME_STATUS} action=start_us_daily_run mode=isolated round=${round} stocks=${stocks_csv} force_run=${US_DSA_FORCE_RUN} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${US_DSA_LOG}"
 
   for stock in "${stocks[@]}"; do
     normalized_stock="${stock//[[:space:]]/}"
@@ -430,7 +568,11 @@ run_isolated_mode() {
     fi
     stock="${normalized_stock}"
     total=$((total + 1))
-    stock_log="${LOG_DIR}/us_dsa_daily_${RUN_DATE}_${stock}.log"
+    if [[ "${round}" == "1" ]]; then
+      stock_log="${LOG_DIR}/us_dsa_daily_${RUN_DATE}_${stock}.log"
+    else
+      stock_log="${LOG_DIR}/us_dsa_daily_${RUN_DATE}_${stock}_retry${round}.log"
+    fi
     : > "${stock_log}"
     log "action=start_us_stock stock=${stock} context_query_id=${US_DSA_MARKET_CONTEXT_QUERY_ID} timeout_seconds=${US_DSA_SINGLE_STOCK_TIMEOUT_SECONDS} log=${stock_log}"
     {
@@ -479,18 +621,20 @@ run_isolated_mode() {
   if [[ "${success_count}" == "0" && "${failure_count}" != "0" && "${US_DSA_ALERT_ON_ZERO_SUCCESS}" == "1" ]]; then
     status="alert"
     final_exit=70
-    log "action=finish_us_daily_run status=alert reason=zero_success success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
+    log "action=finish_us_daily_run round=${round} status=alert reason=zero_success success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
   elif [[ "${failure_count}" != "0" ]]; then
     status="degraded"
-    log "action=finish_us_daily_run status=degraded success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
+    log "action=finish_us_daily_run round=${round} status=degraded success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
   elif [[ "${US_DSA_PREFLIGHT_RUNTIME_STATUS}" == "degraded" ]]; then
     status="degraded"
-    log "action=finish_us_daily_run status=degraded reason=preflight_degraded success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
+    log "action=finish_us_daily_run round=${round} status=degraded reason=preflight_degraded success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
   else
-    log "action=finish_us_daily_run status=ok success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
+    log "action=finish_us_daily_run round=${round} status=ok success=${success_count} failed=${failure_count} total=${total} log=${US_DSA_LOG}"
   fi
 
-  write_status "${status}" "${success_count}" "${failure_count}" "${total}" "${final_exit}"
+  if [[ "${round}" == "1" ]]; then
+    write_status "${status}" "${success_count}" "${failure_count}" "${total}" "${final_exit}"
+  fi
   return "${final_exit}"
 }
 
@@ -539,16 +683,11 @@ if [[ "${US_DSA_MARKET_CONTEXT_RUNTIME_STATUS}" == "skipped" ]]; then
 fi
 
 cd "${DSA_DIR}"
+: > "${US_DSA_LOG}"
+MODE_EXIT=0
 if [[ "${US_DSA_ISOLATE_STOCKS}" == "1" ]]; then
-  if run_isolated_mode; then
-    exit 0
-  else
-    exit $?
-  fi
+  run_isolated_mode "${US_STOCKS}" || MODE_EXIT=$?
 else
-  if run_batch_mode; then
-    exit 0
-  else
-    exit $?
-  fi
+  run_batch_mode || MODE_EXIT=$?
 fi
+finalize_run "${MODE_EXIT}"

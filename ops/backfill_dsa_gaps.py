@@ -4,11 +4,14 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, List, Sequence
+
+ANALYSIS_GAP_EXIT_CODE = 71
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DSA_DIR = PROJECT_ROOT / "vendor" / "daily_stock_analysis"
@@ -23,8 +26,6 @@ os.environ.setdefault("ENV_FILE", str(DSA_ENV))
 
 from executor.config import ExecutorConfig  # noqa: E402
 from executor.signal_reader import parse_date  # noqa: E402
-from src.config import setup_env  # noqa: E402
-from src.core.pipeline import StockAnalysisPipeline  # noqa: E402
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -33,23 +34,30 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _latest_trading_date(db_path: Path) -> date | None:
+def _latest_trading_date(db_path: Path, stock_pool: Sequence[str]) -> date | None:
+    # stock_daily is shared by the CN and US pools; scope to this pool so a
+    # US trading day that is a CN holiday cannot become the CN "latest date".
+    placeholders = ",".join("?" for _ in stock_pool)
     with _connect_ro(db_path) as conn:
-        row = conn.execute("select max(date) as max_date from stock_daily").fetchone()
+        row = conn.execute(
+            f"select max(date) as max_date from stock_daily where code in ({placeholders})",
+            tuple(stock_pool),
+        ).fetchone()
     return parse_date(row["max_date"] if row else None)
 
 
-def _recent_observed_dates(db_path: Path, through: date, days: int) -> List[date]:
+def _recent_observed_dates(db_path: Path, stock_pool: Sequence[str], through: date, days: int) -> List[date]:
+    placeholders = ",".join("?" for _ in stock_pool)
     with _connect_ro(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             select distinct date
             from stock_daily
-            where date <= ?
+            where date <= ? and code in ({placeholders})
             order by date desc
             limit ?
             """,
-            (through.isoformat(), days),
+            (through.isoformat(), *stock_pool, days),
         ).fetchall()
     dates = [parsed for row in rows if (parsed := parse_date(row["date"])) is not None]
     if through not in dates:
@@ -71,7 +79,87 @@ def _missing_codes(db_path: Path, stock_pool: Sequence[str], target_date: date) 
     return [code for code in stock_pool if code not in present]
 
 
+def _analyzed_codes_since(db_path: Path, stock_pool: Sequence[str], since: str) -> set[str]:
+    placeholders = ",".join("?" for _ in stock_pool)
+    with _connect_ro(db_path) as conn:
+        rows = conn.execute(
+            "select distinct code from analysis_history "
+            "where (report_type is null or report_type != 'market_review') and created_at >= ? "
+            f"and code in ({placeholders})",
+            (since, *stock_pool),
+        ).fetchall()
+    return {str(row["code"]) for row in rows}
+
+
+def _analyzed_codes_on(db_path: Path, stock_pool: Sequence[str], target_date: date) -> set[str]:
+    placeholders = ",".join("?" for _ in stock_pool)
+    with _connect_ro(db_path) as conn:
+        rows = conn.execute(
+            "select distinct code from analysis_history "
+            "where (report_type is null or report_type != 'market_review') and date(created_at) = ? "
+            f"and code in ({placeholders})",
+            (target_date.isoformat(), *stock_pool),
+        ).fetchall()
+    return {str(row["code"]) for row in rows}
+
+
+def _notify(title: str, message: str) -> None:
+    try:
+        subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e", "on run argv",
+                "-e", 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Basso"',
+                "-e", "end run",
+                title,
+                message,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def scan_analysis_gaps(
+    db_path: Path,
+    stock_pool: Sequence[str],
+    dates: Sequence[date],
+    latest_date: date,
+) -> List[str]:
+    """Patrol analysis_history coverage next to the stock_daily price patrol.
+
+    Historical dates use date(created_at) == date (CN analyses land the same
+    evening); the latest trading date uses created_at >= date 00:00 so a late
+    manual rerun the next morning still counts. Only latest-date gaps alert.
+    """
+    for trading_date in dates:
+        if trading_date == latest_date:
+            continue
+        analyzed = _analyzed_codes_on(db_path, stock_pool, trading_date)
+        missing = [code for code in stock_pool if code not in analyzed]
+        print(
+            f"analysis_gap date={trading_date.isoformat()} "
+            f"missing={','.join(missing) if missing else 'none'}"
+        )
+
+    since = f"{latest_date.isoformat()} 00:00:00"
+    analyzed_latest = _analyzed_codes_since(db_path, stock_pool, since)
+    latest_missing = [code for code in stock_pool if code not in analyzed_latest]
+    print(
+        f"analysis_gap date={latest_date.isoformat()} "
+        f"missing={','.join(latest_missing) if latest_missing else 'none'} latest=1"
+    )
+    return latest_missing
+
+
 def _fetch_missing_codes(codes: Iterable[str], target_date: date, sleep_seconds: float) -> None:
+    # Vendor imports stay function-local so the patrol helpers above remain
+    # importable without loading the whole DSA stack.
+    from src.config import setup_env
+    from src.core.pipeline import StockAnalysisPipeline
+
     setup_env()
     pipeline = StockAnalysisPipeline(max_workers=1, query_source="dsa_gap_backfill")
     current_time = datetime.combine(target_date, datetime.min.time()).replace(hour=18)
@@ -93,17 +181,22 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=10, help="Recent observed trading dates to scan.")
     parser.add_argument("--sleep-seconds", type=float, default=8.0, help="Pause between stock fetches to avoid dense retries.")
     parser.add_argument("--stock", dest="stocks", action="append", help="Override stock pool; repeat for multiple codes.")
+    parser.add_argument("--no-notify", action="store_true", help="Suppress the macOS notification on analysis gaps.")
     args = parser.parse_args()
 
     config = ExecutorConfig()
-    target_date = parse_date(args.target_date) if args.target_date else _latest_trading_date(config.dsa_db_path)
+    stock_pool = tuple(args.stocks) if args.stocks else tuple(config.stock_pool)
+    target_date = (
+        parse_date(args.target_date)
+        if args.target_date
+        else _latest_trading_date(config.dsa_db_path, stock_pool)
+    )
     if target_date is None:
         print("backfill_abort reason=no_stock_daily_dates")
         return 1
 
-    stock_pool = tuple(args.stocks) if args.stocks else tuple(config.stock_pool)
     scan_days = max(1, int(args.days))
-    dates = _recent_observed_dates(config.dsa_db_path, target_date, scan_days)
+    dates = _recent_observed_dates(config.dsa_db_path, stock_pool, target_date, scan_days)
     print(f"backfill_scan through={target_date.isoformat()} days={scan_days} stocks={','.join(stock_pool)}")
 
     for trading_date in dates:
@@ -118,6 +211,26 @@ def main() -> int:
             f"backfill_result date={trading_date.isoformat()} "
             f"remaining={','.join(still_missing) if still_missing else 'none'}"
         )
+
+    latest_missing = scan_analysis_gaps(config.dsa_db_path, stock_pool, dates, target_date)
+    if latest_missing:
+        print(f"analysis_alert date={target_date.isoformat()} missing={','.join(latest_missing)}")
+        if target_date >= date.today():
+            # The daily wrapper's own DB verify + retry owns today's gaps; the
+            # 18:40 patrol must not false-alarm while the wrapper is still in
+            # its retry window. This patrol alerts on gaps left from past days.
+            print(
+                f"analysis_alert_suppressed date={target_date.isoformat()} "
+                "reason=same_day_owned_by_wrapper"
+            )
+            return 0
+        message = (
+            f"{target_date.isoformat()} 分析缺口: {','.join(latest_missing)}"
+            "（stock_daily 有价无析，需检查 DSA 日跑）"
+        )
+        if not args.no_notify:
+            _notify("DSA 分析巡检告警", message)
+        return ANALYSIS_GAP_EXIT_CODE
 
     return 0
 
