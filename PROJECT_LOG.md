@@ -3,7 +3,7 @@
 > **本文档用途**：任何新开的 AI 会话（Claude/Codex/OpenClaw）或未来的协作者，读完本文件即可掌握项目全貌与当前状态。
 > **维护约定**：每完成一个里程碑、每做一个重大决策，由验收方（Claude）当天追加时间线条目并更新"当前状态"节。其他文档是专题深度材料，本文件是索引与状态权威源。
 
-## 一、当前状态快照（更新于 2026-07-06 深夜）
+## 一、当前状态快照（更新于 2026-07-12）
 
 - **项目根已迁移**：`~/quant`（原 `~/Documents/量化系统` 因 macOS TCC 阻塞 launchd 而废弃，待 CEO 确认后删）。所有路径、排程、git、验收均以 `~/quant` 为准。
 - **阶段**：Phase 1 MVP。M0-M6 已验收；M7（执行器）/M8（周复盘）已实现并"有条件通过"（R1 已解决，R2/R3/R4 待整改）；迁移已验收通过。
@@ -13,6 +13,7 @@
 - **G1-G4 已实现并验收通过**（`runtime_data/acceptance/G1_G4_CLAUDE_VERDICT.md`）：G1 成交改 next_open+开仓双滑点(旧模型留A/B)、G2 三大纪律注入(Claude 金丝雀验证:bull-only 基线真被清空、纪律真进 prompt，零API花费)、G3 防未来函数护栏、G4 包裹层硬门控。**待收尾**：Codex 提交 G1-G4(全未 commit)；G2 的 LLM 合规性与 G1 真实偏差幅度待第一次真实基线跑观察(建议即作 Day 1)。
 - **美股平行赛道已开工**（`US_TRACK_CHECKLIST.md` U0-U9，CEO 拍板完整 fork 强物理隔离 07-07）：`executor/us/` 复制全 7 件、零共享代码；股池 AAPL/NVDA/MSFT/JPM/SPCX、$1M、Tavily、北京清晨调度、SPY基线。与 A 股日常积累并行。**U0-U6 已验收通过**（`US_U6_CLAUDE_VERDICT.md`）：fork 隔离硬证据全成立(A股六件零改/executor us 零耦合/paper.db md5 不变/回归48+11绿)；U6 实盘由 Claude 补跑(Codex 沙箱阻塞外发)——5只美股 DSA 分析+yfinance免key抓日线+G5补全全过G4入 paper_us.db,**含2只真buy(AAPL/JPM)**。偏差:US新闻走了Bocha非Tavily(待修路由)。**Codex 剩余 U7(US执行器+清晨launchd)/U8(SPY周复盘)/Tavily路由修**;CEO:pmset 唤醒扩到清晨。G5 模型已定 gemini-3.5-flash(b5bbd22)。
 - **【关键转折 2026-07-07】软注入被证明不足以产出纪律化输出**（`DAY1_PROBE_CLAUDE_VERDICT.md`）：单股 600519 探雷+Claude 独立复验——G2 注入进了 prompt，但 LLM 真实输出**无三情景、无 invalid_conditions**（根因：DSA 硬编码 JSON schema 无这些槽位，改不了）。Codex 正确判定"不开 Day 1"。**计划修订**：拿纪律化 Day 1 必须建**新工程项 G5 纪律补全包裹层**（我方 executor 一次补全 LLM 调用，生成三情景/失效条件/溯源，再经 G4 验证；自研诊股层雏形，红线内）。CEO 已选**最小补全**，规格 `G5_DISCIPLINE_COMPLETION_SPEC.md`：executor 层直连 Gemini(REST+responseSchema 结构化强制) 把 DSA 输出补出三情景/结构化失效条件/带日期溯源 → 写我方 disciplined_signals 表 → G4 校验(对照组:DSA原始必被拒/G5补全应放行) → 执行器改读此表。**G5 已实现并经 Claude 真实数据验收通过**（`G5_CLAUDE_VERDICT.md`）：真跑 600519 对照组成立(原始 DSA→G4拒/G5补全→G4放行)，产出真三情景+结构化失效条件+带真实日期溯源，并**当场抓出 DSA 看多偏见下调置信度**(single_side_flag)。注意：Codex 只交了代码+mock单测、未做真实跑(Claude 补验)、且未提交——流程缺口已记。G5 已提交(6abac71)+全池5只补全并 Claude 验收通过(全过G4/对照组成立/溯源真实/纪律层有区分度只降茅台看多偏见)。执行器已接线读 disciplined_signals。**信号质量 Day 1 数据=2026-07-07**(今日5只手动补全)。**Day 2+ 自动化前 Codex 必须补两根线**(见 G5_CLAUDE_VERDICT.md)：①把 `discipline_completion --all-active` 插进每日流程(DSA后、执行器前)；②超时鲁棒性(单只重试,一只超时不拖垮整批)。之后 D+14 定性复盘、再开美股赛道。当前全为 watch/hold 无 buy,短期无纸面交易属正常。
+- **DSA 日跑结构已统一到共享大盘上下文 + 单股隔离**（2026-07-12）：A 股、美股每日各自先生成/复用一次市场级上下文，再让 5 只股票分别在独立进程内复用同一份上下文。单股超时/失败不拖垮整批；脚本 exit 0 但业务 0/5 成功会升格为可告警 exit 70。已实测 CN/US 共享上下文各一份、600519/AAPL 单股复用成功；launchd 仍调用原 wrapper 路径，下一次自动调度直接走新结构。
 - **CEO 待办**：`sudo pmset repeat wakeorpoweron MTWRF 17:57:00`（合盖保险，非阻塞）；确认新根稳定一天后删旧根。
 - **日常运行须知**：跑批时段机器插电+开盖（锁屏无妨）；本地代理 127.0.0.1:7890 必须在线。
 
@@ -65,6 +66,14 @@
 - 成交语义升级（CEO 提问触发）：执行器由"次日开盘价无脑成交"改为**限价单语义**（限价=entry_high 不追高线，开盘虚高但日内回落触及即当日成交；过期未成交单独统计为"纪律挡掉的追涨"）。只用日线 OHLC 实现，零新增数据依赖。
 - **今晚 17:58 = 14 天基线 Day 1 首跑窗口。**
 - M7/M8 Codex 交付并 commit（9e412d1/e65f4f1）→ Claude 三路独立核验：**有条件通过**。红线全清（DSA md5 不变、只读、git 净）、核心交易规则正确、复盘数学正确、独立复算成交吻合。但四项须整改（详见 `runtime_data/acceptance/M7_M8_CLAUDE_VERDICT.md`）：**R1 关键**——执行器排程无 --date 默认对 latest_trading_date(现=07-03)成交、而信号是 07-05/06 的，整条链隐含"DSA 盘后写当日 bar"前提从未实证（计划§2.3 要求的验证被跳过），今晚 17:58/18:40 排程是首次真实端到端测试；R2 sell/reduce/avoid 平仓未实现；R3 沪深300 基线因 DSA 不抓指数永久为空+基线计费不对称；R4 归因顺序掩盖 S1 真因+apply_trade 无测试+ST/NULL 潜伏。无数据丢失风险（台账可 backfill 重算）。
+
+**2026-07-12（日）**
+- DSA 失败率专项排查后，统一 A 股/美股日跑结构：每天每个市场只生成一次大盘上下文，5 只股票走单股进程隔离并共享该上下文。核心变更在 `ops/prepare_dsa_market_context.py`、`ops/run_dsa_daily.sh`、`ops/run_us_dsa_daily.sh`，以及 vendor DSA CLI/pipeline/context service。
+- 大盘上下文新增精确 `query_id` 复用、lock 竞争校验、闭市跳过、状态 JSON、hash 审计与失败 exit 68；个股进程新增 `--reuse-market-context --market-context-query-id`，若找不到精确上下文会在个股分析前失败，避免悄悄重新生成或串错市场。
+- 美股 wrapper 保留原有 provider preflight/DeepSeek 降级路径，同时新增单股超时/失败隔离；A 股 wrapper 同步改成同一结构。两边都将“脚本技术 exit 0 但业务 0/5 成功”标成告警态 exit 70。
+- 真实验证结果：CN 生成/复用 `shared_market_cn_cn_live_20260712`，history_id 72，有效交易日 2026-07-10；US 生成/复用 `shared_market_us_us_live_20260712`，history_id 73，有效交易日 2026-07-10。600519 复用 CN 上下文成功入库 id74；AAPL 复用 US 上下文成功入库 id75。
+- 自动化/测试验证：父仓 37 个 unittest 通过；vendor 受影响 unittest 153 个通过；context 相关直接测试 47 个通过；`bash -n`、`py_compile`、`git diff --check`、secret scan 均通过。用户提供的 DeepSeek key 未入库。
+- 提交：父仓 `fe24639 Unify daily DSA market context flow`；vendor 子仓 `8e5ea0c7 Share one market context across isolated stocks`。vendor 中 `docs/CHANGELOG.md`、`src/search_service.py`、`tests/test_search_tavily_provider.py` 为既有未提交改动，本次未触碰。
 
 ## 五、已知问题与观察项（复盘会逐条核对）
 
