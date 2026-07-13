@@ -27,6 +27,7 @@
 4. `DSA_BOOTSTRAP_PLAN.md` — M0-M6 执行计划书，含全部里程碑的验收结论批注（通过/返工记录内联）。
 5. `QUANT_OSS_SURVEY.md` — 开源量化项目调研与借鉴地图：执行器抄谁（RQAlpha/Hikyuu/LEAN/Freqtrade 到文件级）、Phase 2 回测短名单、Phase 4 实盘通道现实边界（散户走 miniQMT）。
 6. `M7_M8_EXECUTION_PLAN.md` — 当前执行中的计划：执行器与周复盘聚合的完整规格与验收标准。
+6.5 `SECTOR_STRUCTURE_LAYER_SPEC.md` — **Phase 2 候选模块规格草稿（未排期）**：板块结构/产业链-拥挤度层。把"不单看个股、看整个市场板块结构 + 追涨危险量化"变成可回测、与执行器解耦的定量层。luopan skill 只作人肉选池助手、不接管道。
 7. `runtime_data/acceptance/` — 全部验收证据与专项结论（不进 git；关键结论文件：`M4_CLAUDE_ACCEPTANCE_VERDICT.md`、`M45FIX_M6_CLAUDE_VERDICT.md`）。
 
 ## 三、关键决策登记簿（新会话必读，避免重新辩论已决事项）
@@ -78,6 +79,11 @@
 - 提交：父仓 `fe24639 Unify daily DSA market context flow`；vendor 子仓 `8e5ea0c7 Share one market context across isolated stocks`。vendor 中 `docs/CHANGELOG.md`、`src/search_service.py`、`tests/test_search_tavily_provider.py` 为既有未提交改动，本次未触碰。
 - **失败率专项复盘（Claude 多智能体取证，晚间）**：六路取证 + 8 假设 × 双镜头对抗验证（7 确认 1 推翻），结论与全量验证记录见 `runtime_data/acceptance/DSA_FAILURE_POSTMORTEM_20260712.md`。核心裁定：丢失的股票-日 0% 归因上游 API 独立故障；头号根因为代理出口事故（H1），放大器为 LLM 假降级（H2）、沉默失败编排（H3）、无定时唤醒（H4）；被推翻假设：进程隔离放大 tushare 限频（实际超限发生在未隔离的旧 CN 批处理内）。
 - **P0 前三条当日落地**（Claude 实现并验收）：①CN 主管道 DeepSeek 跨 provider 降级 + `.env` 假 fallback 修正 + NO_PROXY 补 api.deepseek.com + G5 DeepSeek 直连（07-09 它曾随代理陪葬）；②`ops/us_dsa_preflight.py` 增 `--region cn`，CN wrapper 代理挂/Gemini 地区封锁时自动降级 DeepSeek 续跑而非丢全天；③新增 `ops/verify_dsa_analysis.py`，CN/US 跑批后以 analysis_history 为最终判定，缺口延迟 600s 自动重试一轮 + macOS 通知 + `dsa_alerts.log`（缺口 exit 70 / 校验层异常 exit 72），backfill 巡检补 analysis 维度（往日缺口 exit 71 + 通知，当日让位 wrapper）。全部改动经 23-agent 对抗审查修复 16 项确认问题（含 verify 退出码吞没、状态文件与退出码不一致、契约测试回归、osascript 注入、CN 假期误报、18:40 巡检与重试窗竞态、report_type NULL 语义）。测试：ops 19 / executor 65 / executor/us 37 / dashboard 2 全绿；真实 preflight、真实 DB 校验、真实巡检（准确复现 07-09 缺口）实测通过。**P0-4（pmset 定时唤醒）待 CEO 执行**，命令见"当前状态快照"。
+
+**2026-07-13（一）**
+- **P0-4 晨跑唤醒已由 CEO 执行**：`pmset repeat wakeorpoweron TWRFS 05:05:00` 生效（覆盖美股 05:10 晨跑）。A股傍晚窗口维持插电+开盖纪律（pmset repeat 只能一条 wake，硬覆盖 A股=方案 B 待定）。提交 `d69dd7a`。
+- **装入 luopan 商业研究 skill（项目级）**：`.claude/skills/luopan/`（精简版：SKILL.md + modes/ + README/LICENSE，去掉 1.8M demo；python 脚本仅连 SEC 官方端点、无 exec/subprocess，已扫描）。定位=**给人看的定性研报助手，用于 Phase 2 选池阶段人肉研究，永不接入执行器**（避免重蹈复盘里"LLM 叙事/旧闻当新利好"的靶子）。
+- **新增 Phase 2 候选模块规格草稿**：`SECTOR_STRUCTURE_LAYER_SPEC.md`（板块结构/产业链-拥挤度层）。源于 CEO"不能单看几只股、影响因子太单一、追涨危险"的判断。核心：板块动量 + 产业链 lead-lag（数据估时滞）+ **拥挤度因子把"追涨危险"量化** + 议价能力过滤（落地 luopan"权力按议价能力非产业链位置"洞察）。**两态解耦**：2a 顾问态（只写 sector_context/dashboard，零管道耦合，先做）；2b 护栏态（执行器可选查拥挤度降仓/否决入场，永不自产买入，默认关，须先过板块层 OOS + 防未来函数）。**未排期，待 CEO 决定是否进 Phase 2。**
 
 ## 五、已知问题与观察项（复盘会逐条核对）
 
