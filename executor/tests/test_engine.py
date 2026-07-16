@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 
-from executor.config import FILL_MODEL_LIMIT_ENTRY_HIGH, ExecutorConfig
+from executor.config import FILL_MODEL_LIMIT_ENTRY_HIGH, FILL_MODEL_NEXT_OPEN, ExecutorConfig
 from executor.engine import PaperEngine
 from executor.ledger import PaperLedger, TradeFill
 
@@ -160,13 +160,14 @@ class EngineTests(unittest.TestCase):
                 events = conn.execute("select event_type from signal_events order by id").fetchall()
             self.assertEqual([row["event_type"] for row in events], ["s1_conflict_skip"])
 
-    def test_conditional_entry_records_specific_s1_reason_and_does_not_open(self) -> None:
+    def test_conditional_entry_becomes_limit_plan_and_fills_in_zone(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dsa_path = Path(tmpdir) / "dsa.db"
             ledger_path = Path(tmpdir) / "paper.db"
             _init_dsa_db(dsa_path)
             with sqlite3.connect(dsa_path) as conn:
                 _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-05 12:00:00")
+                _insert_analysis(conn, 2, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-06 12:00:00")
                 _insert_signal(conn, 1, "600900", "buy", 1)
                 _insert_bar(conn, "600900", "2026-07-06", 10.0, 10.5)
 
@@ -179,17 +180,51 @@ class EngineTests(unittest.TestCase):
 
             stats = engine.run_day(date(2026, 7, 6))
 
-            self.assertEqual(stats["s1_conflicts"], 1)
-            self.assertEqual(stats["open_candidates"], 0)
-            self.assertEqual(stats["filled"], 0)
+            # Promoted to a conditional limit plan instead of an s1 conflict skip;
+            # open 10.0 <= entry_high 12.0 so the resting order fills at the open.
+            self.assertEqual(stats["s1_conflicts"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 1)
             with engine.ledger._connect() as conn:
-                event = conn.execute(
-                    "select reason, details_json from signal_events where event_type = 's1_conflict_skip'"
+                events = conn.execute(
+                    "select count(*) as count from signal_events where event_type = 's1_conflict_skip'"
                 ).fetchone()
-            details = json.loads(event["details_json"])
-            self.assertEqual(event["reason"], "conditional_entry")
-            self.assertEqual(details["resolved_action"], "watch")
-            self.assertEqual(details["flat_account_action"], "watch")
+                trade = conn.execute("select fill_price, reason from trades").fetchone()
+            self.assertEqual(events["count"], 0)
+            self.assertEqual(trade["fill_price"], 10.0)
+            self.assertEqual(trade["reason"], "open_within_limit")
+
+    def test_conditional_entry_limit_plan_does_not_chase_above_zone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-05 12:00:00")
+                _insert_analysis(conn, 2, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-06 12:00:00")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+                _insert_bar(conn, "600900", "2026-07-06", 13.0, 13.5)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600900",),
+            )
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            # Whole bar above entry_high 12.0: the plan rests unfilled, no chase.
+            self.assertEqual(stats["s1_conflicts"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 0)
+            self.assertEqual(stats["unfilled"], 1)
+            with engine.ledger._connect() as conn:
+                attempt = conn.execute("select status, reason from order_attempts").fetchone()
+                trades = conn.execute("select count(*) as count from trades").fetchone()
+            self.assertEqual(attempt["status"], "unfilled")
+            self.assertEqual(attempt["reason"], "limit_not_touched")
+            self.assertEqual(trades["count"], 0)
 
     def _run_exit_signal(self, action: str, advice: str) -> tuple[dict, sqlite3.Row]:
         tmpdir = tempfile.TemporaryDirectory()
@@ -283,6 +318,12 @@ class EngineTests(unittest.TestCase):
             position_after_exit = engine.ledger.position("600519")
             self.assertEqual(second_day["sells"], 1)
             self.assertEqual(position_after_exit["quantity"], 0)
+
+    def test_default_fill_model_stays_next_open_hell_mode(self) -> None:
+        # Red-team decision: consistent buys fill at next open with double
+        # slippage; the entry_high limit model is A/B only. Conditional-entry
+        # promotions use the limit model per signal, not via this default.
+        self.assertEqual(ExecutorConfig().fill_model, FILL_MODEL_NEXT_OPEN)
 
     def test_default_open_fill_uses_next_open_and_double_buy_slippage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

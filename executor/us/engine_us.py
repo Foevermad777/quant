@@ -7,9 +7,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
-from executor.us.config_us import FILL_MODEL_NEXT_OPEN, QUANT_DIR, UsExecutorConfig
+from executor.us.config_us import FILL_MODEL_LIMIT_ENTRY_HIGH, FILL_MODEL_NEXT_OPEN, QUANT_DIR, UsExecutorConfig
 from executor.us.ledger_us import TradeFill, UsPaperLedger
-from executor.us.models_us import DecisionSignal, NextOpenFillModel, SlippageModel, UsFeeModel
+from executor.us.models_us import DecisionSignal, LimitFillModel, NextOpenFillModel, SlippageModel, UsFeeModel
 from executor.us.rules_us import (
     cap_order_shares,
     first_exit_trigger,
@@ -43,6 +43,8 @@ def md5_file(path: Path) -> str:
 def _build_fill_model(name: str) -> object:
     if name == FILL_MODEL_NEXT_OPEN:
         return NextOpenFillModel()
+    if name == FILL_MODEL_LIMIT_ENTRY_HIGH:
+        return LimitFillModel()
     raise ValueError(f"unsupported fill_model: {name}")
 
 
@@ -59,6 +61,7 @@ class UsPaperEngine:
         )
         self.ledger = UsPaperLedger(self.config.ledger_db_path, config=self.config)
         self.fill_model = _build_fill_model(self.config.fill_model)
+        self.limit_fill_model = LimitFillModel()
         self.slippage = SlippageModel(self.config.slippage_rate)
         self.fees = UsFeeModel(
             commission_per_share=self.config.commission_per_share,
@@ -164,8 +167,9 @@ class UsPaperEngine:
         stats: Dict[str, int],
     ) -> None:
         for signal in candidates:
+            fill_model = self._fill_model_for(signal)
             if signal.expires_at is not None and execution_date > signal.expires_at.date():
-                blocked = self.fill_model.expired_unfilled(signal, execution_date)
+                blocked = fill_model.expired_unfilled(signal, execution_date)
                 self.ledger.record_order_attempt(
                     signal_id=signal.id,
                     stock_code=signal.stock_code,
@@ -177,7 +181,7 @@ class UsPaperEngine:
                 continue
 
             bar = bars.get(signal.stock_code)
-            fill = self.fill_model.buy_fill(signal, bar)
+            fill = fill_model.buy_fill(signal, bar)
             if not fill.filled or fill.price is None:
                 self.ledger.record_order_attempt(
                     signal_id=signal.id,
@@ -255,6 +259,12 @@ class UsPaperEngine:
                 fill.reason,
                 shares,
             )
+
+    def _fill_model_for(self, signal: DecisionSignal) -> object:
+        plan = signal.metadata.get("execution_plan") if isinstance(signal.metadata, dict) else None
+        if isinstance(plan, dict) and plan.get("type") == "conditional_limit":
+            return self.limit_fill_model
+        return self.fill_model
 
     def _record_data_gaps(self, execution_date: date, bars: Dict[str, object], stats: Dict[str, int]) -> None:
         available = sorted(code for code in self.config.stock_pool if code in bars)

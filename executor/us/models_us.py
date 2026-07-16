@@ -65,6 +65,36 @@ class NextOpenFillModel:
         return FillResult(False, "unfilled", "not_expired", trade_date=current_date)
 
 
+class LimitFillModel:
+    """Daily-bar approximation of a resting limit buy order.
+
+    Limit price is the signal's entry_high. If the open is already at or below
+    the limit, the order fills at the open. If the open is above the limit but
+    the day's low touches the limit, it fills at the limit. Otherwise it is
+    carried to the next execution date until expiry.
+    """
+
+    def buy_fill(self, signal: DecisionSignal, bar: Optional[DailyBar]) -> FillResult:
+        if bar is None:
+            return FillResult(False, "unfilled", "suspended")
+        if signal.entry_high is None or signal.entry_high <= 0:
+            return FillResult(False, "unfilled", "missing_entry_high", trade_date=bar.date)
+        if bar.open is None or bar.low is None:
+            return FillResult(False, "unfilled", "incomplete_bar", trade_date=bar.date)
+
+        limit_price = float(signal.entry_high)
+        if bar.open <= limit_price:
+            return FillResult(True, "filled", "open_within_limit", price=float(bar.open), trade_date=bar.date)
+        if bar.low <= limit_price:
+            return FillResult(True, "filled", "intraday_limit_touch", price=limit_price, trade_date=bar.date)
+        return FillResult(False, "unfilled", "limit_not_touched", trade_date=bar.date)
+
+    def expired_unfilled(self, signal: DecisionSignal, current_date: date) -> FillResult:
+        if signal.expires_at is not None and current_date > signal.expires_at.date():
+            return FillResult(False, "blocked", "discipline_blocked_chase", trade_date=current_date)
+        return FillResult(False, "unfilled", "not_expired", trade_date=current_date)
+
+
 @dataclass(frozen=True)
 class SlippageModel:
     rate: float = 0.001

@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 FILL_MODEL_NEXT_OPEN = "next_open"
+FILL_MODEL_LIMIT_ENTRY_HIGH = "limit_entry_high"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_DIR = PROJECT_ROOT / "runtime_data"

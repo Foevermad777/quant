@@ -160,12 +160,14 @@ class SignalReader:
 
     def open_candidates(self, execution_date: date, held_symbols: Optional[Iterable[str]] = None) -> List[DecisionSignal]:
         held = set(held_symbols or ())
-        consistent = []
+        candidates = []
         for signal in self.active_signals_before(execution_date):
             advice = self.advice_for_signal(signal, has_position=signal.stock_code in held)
             if _action_group(advice.action) == "entry" and self.is_s1_consistent(signal, advice):
-                consistent.append(self._with_execution_action(signal, advice))
-        return self._latest_by_symbol(consistent)
+                candidates.append(self._with_execution_action(signal, advice))
+            elif signal.stock_code not in held and self.is_conditional_entry_plan(signal, advice):
+                candidates.append(self._as_conditional_limit_plan(signal, advice))
+        return self._latest_by_symbol(candidates)
 
     def exit_candidates(self, execution_date: date, held_symbols: Optional[Iterable[str]] = None) -> List[DecisionSignal]:
         held = set(held_symbols or ())
@@ -185,8 +187,11 @@ class SignalReader:
         conflicts: List[tuple[DecisionSignal, AnalysisAdvice]] = []
         for signal in self.active_signals_before(execution_date):
             advice = self.advice_for_signal(signal, has_position=signal.stock_code in held)
-            if not self.is_s1_consistent(signal, advice):
-                conflicts.append((signal, advice))
+            if self.is_s1_consistent(signal, advice):
+                continue
+            if signal.stock_code not in held and self.is_conditional_entry_plan(signal, advice):
+                continue
+            conflicts.append((signal, advice))
         return conflicts
 
     def advice_for_signal(self, signal: DecisionSignal, *, has_position: bool = False) -> AnalysisAdvice:
@@ -289,6 +294,40 @@ class SignalReader:
             "intent_source": advice.intent_source,
         }
         return replace(signal, action=advice.action, metadata=metadata)
+
+    @staticmethod
+    def is_conditional_entry_plan(signal: DecisionSignal, advice: AnalysisAdvice) -> bool:
+        """A conditional-entry buy carries an executable plan: entry zone + expiry.
+
+        Instead of discarding it as a conflict, it becomes a resting limit order
+        at entry_high that only fills if price returns to the zone (never chases).
+        """
+        return (
+            advice.conflict_status == "conditional_entry"
+            and _action_group(signal.action) == "entry"
+            and signal.entry_high is not None
+            and signal.entry_high > 0
+            and signal.expires_at is not None
+        )
+
+    @staticmethod
+    def _as_conditional_limit_plan(signal: DecisionSignal, advice: AnalysisAdvice) -> DecisionSignal:
+        metadata = dict(signal.metadata)
+        metadata["intent_resolution"] = {
+            "flat_account_action": advice.flat_account_action,
+            "holding_action": advice.holding_action,
+            "resolved_action": advice.resolved_action,
+            "effective_action": signal.action,
+            "conflict_status": advice.conflict_status,
+            "conflict_reason": advice.conflict_reason,
+            "intent_source": advice.intent_source,
+        }
+        metadata["execution_plan"] = {
+            "type": "conditional_limit",
+            "limit_price": signal.entry_high,
+            "source": "s1_conditional_entry_promotion",
+        }
+        return replace(signal, metadata=metadata)
 
     def bar(self, stock_code: str, day: date) -> Optional[DailyBar]:
         with self._connect() as conn:

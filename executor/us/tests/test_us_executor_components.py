@@ -279,7 +279,7 @@ class UsPaperEngineTests(unittest.TestCase):
             self.assertEqual(stats["open_candidates"], 1)
             self.assertEqual(stats["filled"], 1)
 
-    def test_conditional_entry_records_specific_s1_reason_and_does_not_open(self) -> None:
+    def test_conditional_entry_becomes_limit_plan_and_fills_in_zone(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dsa_path = Path(tmpdir) / "dsa.db"
             ledger_path = Path(tmpdir) / "paper_us.db"
@@ -304,16 +304,19 @@ class UsPaperEngineTests(unittest.TestCase):
 
             stats = engine.run_day(date(2026, 7, 8))
 
-            self.assertEqual(stats["s1_conflicts"], 1)
-            self.assertEqual(stats["open_candidates"], 0)
-            self.assertEqual(stats["filled"], 0)
+            # Promoted to a conditional limit plan instead of an s1 conflict skip;
+            # open 30.0 <= entry_high 32.0 so the resting order fills at the open.
+            self.assertEqual(stats["s1_conflicts"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 1)
             with engine.ledger._connect() as conn:
-                event = conn.execute(
-                    "select reason, details_json from signal_events where event_type = 's1_conflict_skip'"
+                events = conn.execute(
+                    "select count(*) as count from signal_events where event_type = 's1_conflict_skip'"
                 ).fetchone()
-            details = json.loads(event["details_json"])
-            self.assertEqual(event["reason"], "conditional_entry")
-            self.assertEqual(details["resolved_action"], "watch")
+                trade = conn.execute("select fill_price, reason from trades where side = 'buy'").fetchone()
+            self.assertEqual(events["count"], 0)
+            self.assertEqual(trade["fill_price"], 30.0)
+            self.assertEqual(trade["reason"], "open_within_limit")
 
     def test_big_gap_open_still_fills_and_same_day_stop_sells_t0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

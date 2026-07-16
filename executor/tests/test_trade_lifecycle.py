@@ -223,14 +223,14 @@ class DisciplinedTradeLifecycleTests(unittest.TestCase):
                 ).fetchone()["p"]
             self.assertLess(pnl, 0)  # exited below the 10.0 entry
 
-    def test_g5_watch_is_blocked_like_live(self) -> None:
-        # Mirrors the live reality: a disciplined signal whose flat-account action
-        # is watch (not buy) must NOT open, and is logged as an s1 conflict skip.
+    def test_g5_hard_conflict_is_blocked_like_live(self) -> None:
+        # A disciplined signal whose label/text disagreement is a hard conflict
+        # must NOT open, and is logged as an s1 conflict skip.
         with tempfile.TemporaryDirectory() as tmp:
             dsa, ledger, disc, config = self._make(tmp)
             _insert_disciplined_buy(
                 disc, flat_account_action="watch", resolved_action="watch",
-                conflict_status="conditional_entry",
+                conflict_status="hard_conflict",
             )
             _insert_bar(dsa, "600519", "2026-07-06", 10.0, 10.3, 9.9, 10.2)
             _insert_analysis(dsa, 10, "600519", "2026-07-06 12:00:00")
@@ -243,6 +243,31 @@ class DisciplinedTradeLifecycleTests(unittest.TestCase):
             self.assertEqual(stats["s1_conflicts"], 1)
             position = engine.ledger.position("600519")  # never traded -> no position row
             self.assertTrue(position is None or position["quantity"] == 0)
+
+    def test_g5_conditional_entry_is_promoted_to_limit_plan_and_fills_in_zone(self) -> None:
+        # "Buy on pullback to the zone" is an executable plan, not a conflict:
+        # it becomes a resting limit order at entry_high and fills when touched.
+        with tempfile.TemporaryDirectory() as tmp:
+            dsa, ledger, disc, config = self._make(tmp)
+            _insert_disciplined_buy(
+                disc, flat_account_action="watch", resolved_action="watch",
+                conflict_status="conditional_entry",
+            )
+            _insert_bar(dsa, "600519", "2026-07-06", 10.0, 10.3, 9.9, 10.2)  # open 10.0 <= entry_high 10.5
+            _insert_analysis(dsa, 10, "600519", "2026-07-06 12:00:00")
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["s1_conflicts"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 1)
+            position = engine.ledger.position("600519")
+            self.assertGreater(position["quantity"], 0)
+            with engine.ledger._connect() as conn:
+                trade = conn.execute("select fill_price, reason from trades").fetchone()
+            self.assertEqual(trade["fill_price"], 10.0)
+            self.assertEqual(trade["reason"], "open_within_limit")
 
 
 if __name__ == "__main__":

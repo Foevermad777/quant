@@ -62,6 +62,7 @@ class PaperEngine:
         )
         self.ledger = PaperLedger(self.config.ledger_db_path, config=self.config)
         self.fill_model = _build_fill_model(self.config.fill_model)
+        self.limit_fill_model = LimitFillModel()
         self.slippage = SlippageModel(self.config.slippage_rate)
         self.fees = FeeModel(
             commission_rate=self.config.commission_rate,
@@ -167,8 +168,9 @@ class PaperEngine:
         stats: Dict[str, int],
     ) -> None:
         for signal in candidates:
+            fill_model = self._fill_model_for(signal)
             if signal.expires_at is not None and execution_date > signal.expires_at.date():
-                blocked = self.fill_model.expired_unfilled(signal, execution_date)
+                blocked = fill_model.expired_unfilled(signal, execution_date)
                 self.ledger.record_order_attempt(
                     signal_id=signal.id,
                     stock_code=signal.stock_code,
@@ -198,7 +200,7 @@ class PaperEngine:
                 stats["unfilled"] += 1
                 continue
 
-            fill = self.fill_model.buy_fill(signal, bar)
+            fill = fill_model.buy_fill(signal, bar)
             if not fill.filled or fill.price is None:
                 self.ledger.record_order_attempt(
                     signal_id=signal.id,
@@ -276,6 +278,12 @@ class PaperEngine:
                 fill.reason,
                 shares,
             )
+
+    def _fill_model_for(self, signal: DecisionSignal) -> object:
+        plan = signal.metadata.get("execution_plan") if isinstance(signal.metadata, dict) else None
+        if isinstance(plan, dict) and plan.get("type") == "conditional_limit":
+            return self.limit_fill_model
+        return self.fill_model
 
     def _record_data_gaps(self, execution_date: date, bars: Dict[str, object], stats: Dict[str, int]) -> None:
         available = sorted(code for code in self.config.stock_pool if code in bars)

@@ -213,7 +213,7 @@ class SignalReaderTests(unittest.TestCase):
             self.assertTrue(all(advice.flat_account_action == "watch" for _, advice in conflicts))
             self.assertTrue(all(advice.holding_action == "hold" for _, advice in conflicts))
 
-    def test_conditional_entry_is_blocked_without_direct_buy(self) -> None:
+    def test_conditional_entry_is_promoted_to_limit_plan_not_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             dsa_path = Path(tmpdir) / "dsa.db"
             _init_dsa_db(dsa_path)
@@ -222,12 +222,32 @@ class SignalReaderTests(unittest.TestCase):
                 _insert_signal(conn, 1, "600900", "buy", 1)
 
             reader = SignalReader(dsa_path)
+            candidates = reader.open_candidates(date(2026, 7, 9))
             conflicts = reader.s1_conflicts(date(2026, 7, 9))
 
-            self.assertEqual(reader.open_candidates(date(2026, 7, 9)), [])
+            self.assertEqual(conflicts, [])
+            self.assertEqual(len(candidates), 1)
+            candidate = candidates[0]
+            self.assertEqual(candidate.action, "buy")
+            plan = candidate.metadata["execution_plan"]
+            self.assertEqual(plan["type"], "conditional_limit")
+            self.assertEqual(plan["limit_price"], candidate.entry_high)
+            self.assertEqual(candidate.metadata["intent_resolution"]["conflict_status"], "conditional_entry")
+
+    def test_conditional_entry_for_held_symbol_stays_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+
+            reader = SignalReader(dsa_path)
+            candidates = reader.open_candidates(date(2026, 7, 9), held_symbols={"600900"})
+            conflicts = reader.s1_conflicts(date(2026, 7, 9), held_symbols={"600900"})
+
+            self.assertEqual(candidates, [])
             self.assertEqual(len(conflicts), 1)
-            self.assertEqual(conflicts[0][1].conflict_status, "conditional_entry")
-            self.assertEqual(conflicts[0][1].resolved_action, "watch")
 
     def test_holding_context_can_use_holding_action_for_exit_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

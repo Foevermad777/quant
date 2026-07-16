@@ -3,7 +3,9 @@
 > **本文档用途**：任何新开的 AI 会话（Claude/Codex/OpenClaw）或未来的协作者，读完本文件即可掌握项目全貌与当前状态。
 > **维护约定**：每完成一个里程碑、每做一个重大决策，由验收方（Claude）当天追加时间线条目并更新"当前状态"节。其他文档是专题深度材料，本文件是索引与状态权威源。
 
-## 一、当前状态快照（更新于 2026-07-12）
+## 一、当前状态快照（更新于 2026-07-16）
+
+- **【最新 2026-07-16】零成交根因已结构性定性 + C/A 方案落地**：`action`=score 机械映射（立场≠指令）导致一周 68 条 buy 全被 S1 拦（通过率 0%）。C：executor 两市场把 `conditional_entry` 升格为条件限价计划（`LimitFillModel` 按信号覆盖，默认地狱模式未动），回归 CN 73+US 37 全绿，**下一交易日起可能出现首笔纸面成交**，观察限价成交率/踏空率/接飞刀率；A：vendor DSA metadata 增 `price_above_entry_zone` 确定性标注（只标记不降级，**vendor 未 commit 待人工确认**）；B：`DSA_EXECUTION_INTENT_SPEC.md` 规格就绪未排期。详见时间线 07-16。
 
 - **项目根已迁移**：`~/quant`（原 `~/Documents/量化系统` 因 macOS TCC 阻塞 launchd 而废弃，待 CEO 确认后删）。所有路径、排程、git、验收均以 `~/quant` 为准。
 - **阶段**：Phase 1 MVP。M0-M6 已验收；M7（执行器）/M8（周复盘）已实现并"有条件通过"（R1 已解决，R2/R3/R4 待整改）；迁移已验收通过。
@@ -97,3 +99,10 @@
 6. **执行器至今 0 成交、0 持仓（2026-07-14 深挖结论）**：paper.db/paper_us.db 资金全额未动、净值恒等初始。根因=纪律层在正确"不追涨"：86 条 G5 纪律信号中 `flat_account_action` 无一为 buy，42+29 条 `s1_conflict_skip` 拆解为 `hard_conflict`（DSA 决策层标 buy 但其分析正文写观望/持有，看多偏见的量化实锤，A股 25 条）、`conditional_entry`（DSA 说"回调到支撑再买"但现价在入场区之上=追高，冒烟证据 AAPL 现价 316.22 > 入场区 302.6~312.0→观望）、`position_context_split`（空仓观望/持有者持有）。**买入路径经代码核查是接通的**（`is_s1_consistent`+`buy_fill`+`open_candidates` 存在"G5 给 flat_account_action=buy 且价在区内→成交"的通路，单测覆盖），只是这 ~10 天单边上涨行情里价格从未在新鲜信号有效期内回落进入场区，故未触发。
 7. **执行器买卖全链路已用隔离 fixture 端到端验证（2026-07-14 完成）**：`executor/tests/test_trade_lifecycle.py`（4 测试）**专攻 live 从未跑通的那条路——G5 `disciplined_signals`+`flat_account_action=buy`+`consistent`**：证明 buy→次日开盘价成交→建仓+扣现金→快照→次日价触发止盈(realized_pnl>0)/止损(realized_pnl<0)平仓全链路可跑通；负例 watch/conditional_entry 仍被正确挡下(0 开仓、s1_conflict_skip)，与 live 一致。**结论：执行器不是瘸腿，是纪律严明——扳机能扣，只是无真实信号触发过。** 独立临时库、不重跑 DSA、不碰 live 数据，零 look-ahead。executor 回归 65→69 全绿。历史策略回测仍走既有 OOS 口径（`runtime_data/oos/`，point-in-time），绝不对旧日期重跑 DSA。
 8. **入场区可能系统性偏低（待观察）**：DSA/G5 给的 entry 区若长期在市价下方，会只在深度回调才买、错过有效突破。建议做"入场区 vs 市价差距"监控指标，纳入 Phase 2 校准。
+
+**2026-07-16（四）**
+- **零成交根因升级为结构性定性（CEO 追问触发）**：`action` 由 `sentiment_score` 经 canonical scale 机械映射（60-79→buy，vendor `decision_scale.py`），score 表达**立场**而非**执行指令**——"看多但等回调"被压扁成 `buy`，与正文/入场区必然打架。一周 68 条 buy（A股 32/美股 36）S1 通过率 0%、`order_attempts` 0 行（全拦在比价之前）。按天核对表：hard_conflict A24/US8、conditional_entry A9/US18、position_split A2/US27、mismatch 4/2。
+- **第 0 步前向收益回放（只读）**：29 条被拦 buy 无一亏损（单边上涨行情，样本小、仅描述性）。naive 全成交：A股 +2.21%/13 条、美股 +2.53%/16 条；限价反事实（LimitFillModel 语义）：成交 4/13 与 10/16，成交者均价 +3.21%/+3.40%，优于无脑开盘买约 1pct。数据支持"conditional_entry 转限价计划"，同时印证纪律拦的是自相矛盾的信号、方向没错。
+- **C 方案落地（executor 两市场）**：S1 对 `conditional_entry` 从"丢弃"改为**升格为条件限价计划**——`open_candidates` 接纳（空仓限定，持仓者仍按冲突拦），metadata 打 `execution_plan={type: conditional_limit, limit_price: entry_high}`，engine 按信号选 `LimitFillModel`（开盘≤entry_high 按开盘成、盘中 low 触及按限价成、到期未触发=discipline_blocked_chase）。`hard_conflict`/`position_context_split`/mismatch 照拦。**默认成交模型未动**（次日开盘+双倍滑点地狱模式；自纠记录：实现中曾把默认切成 limit，因违反决策登记簿"限价模型仅留 A/B"回退——conditional 的限价语义走按信号覆盖，不走默认值）。US 侧补齐 `LimitFillModel`+配置常量对齐 CN。回归 CN 73 + US 37 + ops 全绿（新增用例：区内成交/区上不追高/持仓者不升格/硬冲突仍拦）。**下一交易日起可能出现首笔真实纸面成交**。观察指标已立：限价成交率、踏空率、接飞刀率（成交后 2 日内触止损）。
+- **A 方案落地（vendor DSA，未 commit，该仓需人工确认）**：`decision_signal_extractor.py` 增确定性标注——buy/add 且现价>entry_high×1.005 时 metadata 写 `price_above_entry_zone{current_price, entry_high, gap_pct}`，**只标记不降级**（降级会在源头杀死信号，C 就收不到限价计划）。vendor pytest 19 过（含新增 2 用例），CHANGELOG [Unreleased] 已补行。
+- **B 方案出规格未排期**：`DSA_EXECUTION_INTENT_SPEC.md`——立场/执行意图拆分（源头自报 flat/holding action + entry_condition），G5 从解释者降为校验者，S1 保留纵深；shadow 双写≥10 交易日+一致率≥90% 为切换门。待 C 观测数据与 CEO 拍板。
