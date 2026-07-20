@@ -77,11 +77,19 @@ class SignalReader:
         db_path: Path,
         disciplined_db_path: Optional[Path] = None,
         *,
+        market: str = "cn",
         use_disciplined_signals: bool = True,
         sqlite_timeout_seconds: float = SQLITE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.disciplined_db_path = Path(disciplined_db_path) if disciplined_db_path is not None else None
+        # Market isolation boundary: this reader only ever surfaces signals for
+        # `market`. decision_signals / disciplined_signals are shared CN+US tables,
+        # so without this filter the CN executor would ingest US signals (and vice
+        # versa). Mirrors executor/us/signal_reader_us.py.
+        self.market = str(market).strip().lower()
+        if not self.market:
+            raise ValueError("SignalReader market must not be empty")
         self.use_disciplined_signals = use_disciplined_signals
         self.sqlite_timeout_seconds = sqlite_timeout_seconds
 
@@ -137,11 +145,12 @@ class SignalReader:
                     from disciplined_signals
                     where status = 'active'
                       and gate_accepted = 1
+                      and market = ?
                       and date(created_at) < ?
                       and (completed_at is null or date(completed_at) < ?)
                     order by datetime(created_at), source_signal_id
                     """,
-                    (execution_date.isoformat(), execution_date.isoformat()),
+                    (self.market, execution_date.isoformat(), execution_date.isoformat()),
                 ).fetchall()
             return [self._row_to_disciplined_signal(row) for row in rows]
 
@@ -151,10 +160,11 @@ class SignalReader:
                 select *
                 from decision_signals
                 where status = 'active'
+                  and market = ?
                   and date(created_at) < ?
                 order by datetime(created_at), id
                 """,
-                (execution_date.isoformat(),),
+                (self.market, execution_date.isoformat()),
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 

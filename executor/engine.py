@@ -58,6 +58,7 @@ class PaperEngine:
         self.reader = SignalReader(
             self.config.dsa_db_path,
             disciplined_db_path,
+            market=self.config.market,
             use_disciplined_signals=self.config.use_disciplined_signals,
         )
         self.ledger = PaperLedger(self.config.ledger_db_path, config=self.config)

@@ -248,9 +248,16 @@ class DsaSignalContextLoader:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def active_signal_ids(self, stock_codes: Optional[Sequence[str]] = None) -> list[int]:
+    def active_signal_ids(
+        self,
+        stock_codes: Optional[Sequence[str]] = None,
+        market: Optional[str] = None,
+    ) -> list[int]:
         params: list[Any] = []
         predicate = "status = 'active'"
+        if market:
+            predicate += " and market = ?"
+            params.append(str(market).strip().lower())
         if stock_codes:
             placeholders = ",".join("?" for _ in stock_codes)
             predicate += f" and stock_code in ({placeholders})"
@@ -1468,6 +1475,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--signal-id", type=int, action="append", dest="signal_ids", help="DSA decision_signals.id to complete.")
     parser.add_argument("--all-active", action="store_true", help="Complete all active DSA decision_signals.")
     parser.add_argument("--stock-code", action="append", dest="stock_codes", help="Limit --all-active to one stock code. Repeatable.")
+    parser.add_argument("--market", default=None, help="Limit --all-active to a single market (e.g. cn, us). Keeps CN/US disciplined stores isolated.")
     parser.add_argument("--force", action="store_true", help="Replace an existing disciplined signal for the same source_signal_id.")
     parser.add_argument("--dsa-db", type=Path, default=DSA_DB_PATH)
     parser.add_argument("--store-db", type=Path, default=PAPER_DB_PATH)
@@ -1528,7 +1536,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     signal_ids = list(args.signal_ids or [])
     if args.all_active:
-        signal_ids.extend(completer.loader.active_signal_ids(args.stock_codes))
+        signal_ids.extend(completer.loader.active_signal_ids(args.stock_codes, market=args.market))
     signal_ids = sorted(set(signal_ids))
     if not signal_ids:
         raise SystemExit("Provide --signal-id or --all-active.")

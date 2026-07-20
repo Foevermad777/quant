@@ -274,6 +274,69 @@ class SignalReaderTests(unittest.TestCase):
             self.assertEqual([signal.stock_code for signal in candidates], ["600900"])
             self.assertEqual(candidates[0].action, "reduce")
 
+    def test_reader_isolates_market_in_disciplined_branch(self) -> None:
+        # decision_signals / disciplined_signals are shared CN+US tables. The CN
+        # reader must never surface US rows (and vice versa), otherwise the CN
+        # executor would process US signals into the CN ledger. Regression guard
+        # for the 2026-07 cross-market leak.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "disciplined.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(disciplined_path) as conn:
+                for sid, code, mkt in ((1, "600519", "cn"), (2, "AAPL", "us")):
+                    conn.execute(
+                        """
+                        insert into disciplined_signals(
+                            source_signal_id, source_report_id, stock_code, stock_name, market,
+                            action, confidence, entry_high, entry_low, stop_loss, target_price,
+                            status, created_at, expires_at, plan_quality, schema_version,
+                            completion_version, completed_at, updated_at, model,
+                            completion_payload_json, gate_accepted, gate_action, gate_reasons_json
+                        )
+                        values (?, ?, ?, ?, ?, 'buy', 0.8, 12.0, 10.0, 9.0, 15.0,
+                                'active', '2026-07-08 10:00:00', '2026-07-15 15:00:00',
+                                'ok', 'g5-discipline-v0.1', 'g5-minimal-v0.1',
+                                '2026-07-08 10:05:00', '2026-07-08 10:05:00',
+                                'gemini-3.5-flash', ?, 1, 'pass', '[]')
+                        """,
+                        (sid, sid, code, code, mkt, json.dumps({})),
+                    )
+
+            cn_codes = [s.stock_code for s in SignalReader(dsa_path, disciplined_path, market="cn").active_signals_before(date(2026, 7, 9))]
+            us_codes = [s.stock_code for s in SignalReader(dsa_path, disciplined_path, market="us").active_signals_before(date(2026, 7, 9))]
+
+            self.assertEqual(cn_codes, ["600519"])
+            self.assertEqual(us_codes, ["AAPL"])
+            self.assertNotIn("AAPL", cn_codes)
+
+    def test_reader_isolates_market_in_decision_signals_branch(self) -> None:
+        # Same guard for the raw decision_signals fallback path (no disciplined store).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                for sid, code, mkt in ((1, "600519", "cn"), (2, "AAPL", "us")):
+                    conn.execute(
+                        """
+                        insert into decision_signals(
+                            id, stock_code, stock_name, action, confidence, entry_high, entry_low,
+                            stop_loss, target_price, status, created_at, expires_at, source_report_id,
+                            metadata_json, market, source_type, source_agent, plan_quality
+                        )
+                        values (?, ?, ?, 'buy', 0.8, 12.0, 10.0, 9.0, 15.0, 'active',
+                                '2026-07-08 10:00:00', '2026-07-15 15:00:00', ?,
+                                ?, ?, 'analysis', 'test', 'ok')
+                        """,
+                        (sid, code, code, sid, json.dumps({}), mkt),
+                    )
+
+            reader = SignalReader(dsa_path, market="cn", use_disciplined_signals=False)
+            codes = [s.stock_code for s in reader.active_signals_before(date(2026, 7, 9))]
+            self.assertEqual(codes, ["600519"])
+            self.assertNotIn("AAPL", codes)
+
 
 if __name__ == "__main__":
     unittest.main()

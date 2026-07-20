@@ -27,6 +27,7 @@ class ExecutorConfig:
     dsa_db_path: Path = DSA_DB_PATH
     ledger_db_path: Path = PAPER_DB_PATH
     disciplined_db_path: Optional[Path] = None
+    market: str = "cn"
     use_disciplined_signals: bool = True
     initial_cash: float = 1_000_000.0
     per_signal_cash: float = 100_000.0
