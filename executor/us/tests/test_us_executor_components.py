@@ -66,7 +66,15 @@ def _insert_analysis(conn: sqlite3.Connection, row_id: int, code: str, advice: s
     )
 
 
-def _insert_signal(conn: sqlite3.Connection, row_id: int, code: str, action: str, source_report_id: int) -> None:
+def _insert_signal(
+    conn: sqlite3.Connection,
+    row_id: int,
+    code: str,
+    action: str,
+    source_report_id: int,
+    *,
+    expires_at: str | None = "2026-07-15 16:00:00",
+) -> None:
     conn.execute(
         """
         insert into decision_signals(
@@ -75,10 +83,10 @@ def _insert_signal(conn: sqlite3.Connection, row_id: int, code: str, action: str
             metadata_json, market, source_type, source_agent, plan_quality
         )
         values (?, ?, ?, ?, 0.8, 32.0, 28.0, 9.0, null, 'active',
-                '2026-07-07 12:00:00', '2026-07-15 16:00:00', ?,
+                '2026-07-07 12:00:00', ?, ?,
                 ?, 'us', 'analysis', 'test', 'ok')
         """,
-        (row_id, code, code, action, source_report_id, json.dumps({})),
+        (row_id, code, code, action, expires_at, source_report_id, json.dumps({})),
     )
 
 
@@ -317,6 +325,109 @@ class UsPaperEngineTests(unittest.TestCase):
             self.assertEqual(events["count"], 0)
             self.assertEqual(trade["fill_price"], 30.0)
             self.assertEqual(trade["reason"], "open_within_limit")
+
+    def test_expired_sell_signal_never_reaches_exit_candidates(self) -> None:
+        # Layer 1 of the stale-signal guard: the reader must not surface an
+        # expired sell signal, so a held position is never sold off a stale
+        # plan. Mirrors executor/tests/test_engine.py.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "sell", "2026-07-07 12:00:00")
+                _insert_signal(conn, 1, "AAPL", "sell", 1, expires_at="2026-07-07 16:00:00")
+                _insert_bar(conn, "AAPL", "2026-07-07", 10.0, 9.5, 10.0)
+                _insert_bar(conn, "AAPL", "2026-07-08", 11.0, 10.5, 11.5)
+
+            config = UsExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                disciplined_db_path=ledger_path,
+                stock_pool=("AAPL",),
+            )
+            ledger = UsPaperLedger(ledger_path, config=config)
+            ledger.initialize()
+            ledger.apply_trade(
+                TradeFill(
+                    signal_id=999,
+                    stock_code="AAPL",
+                    side="buy",
+                    trade_date=date(2026, 7, 7),
+                    shares=100,
+                    fill_price=10.0,
+                    exec_price=10.0,
+                    gross_amount=1000.0,
+                    fees=0.0,
+                    taxes=0.0,
+                    cash_delta=-1000.0,
+                    reason="seed_position",
+                    created_at=datetime(2026, 7, 7, 12, 0, 0),
+                )
+            )
+            ledger.settle_positions()
+            engine = UsPaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 8))
+
+            self.assertEqual(stats["exit_candidates"], 0)
+            self.assertEqual(stats["sells"], 0)
+            self.assertEqual(engine.ledger.position("AAPL")["quantity"], 100)
+
+    def test_engine_backstop_blocks_stale_exit_signal(self) -> None:
+        # Layer 2 (defense in depth): even if a stale exit signal slips past the
+        # reader (future regression), the engine must block it, never sell.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper_us.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "AAPL", "sell", "2026-07-07 12:00:00")
+                _insert_signal(conn, 1, "AAPL", "sell", 1, expires_at="2026-07-07 16:00:00")
+                _insert_bar(conn, "AAPL", "2026-07-07", 10.0, 9.5, 10.0)
+                _insert_bar(conn, "AAPL", "2026-07-08", 11.0, 10.5, 11.5)
+
+            config = UsExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                disciplined_db_path=ledger_path,
+                stock_pool=("AAPL",),
+            )
+            ledger = UsPaperLedger(ledger_path, config=config)
+            ledger.initialize()
+            ledger.apply_trade(
+                TradeFill(
+                    signal_id=999,
+                    stock_code="AAPL",
+                    side="buy",
+                    trade_date=date(2026, 7, 7),
+                    shares=100,
+                    fill_price=10.0,
+                    exec_price=10.0,
+                    gross_amount=1000.0,
+                    fees=0.0,
+                    taxes=0.0,
+                    cash_delta=-1000.0,
+                    reason="seed_position",
+                    created_at=datetime(2026, 7, 7, 12, 0, 0),
+                )
+            )
+            ledger.settle_positions()
+            engine = UsPaperEngine(config)
+            stale = engine.reader.get_signal(1)
+            engine.reader.exit_candidates = lambda execution_date, held_symbols=None: [stale]
+
+            stats = engine.run_day(date(2026, 7, 8))
+
+            self.assertEqual(stats["sells"], 0)
+            self.assertEqual(stats["blocked"], 1)
+            self.assertEqual(engine.ledger.position("AAPL")["quantity"], 100)
+            with engine.ledger._connect() as conn:
+                attempt = conn.execute(
+                    "select status, reason from order_attempts where stock_code = 'AAPL'"
+                ).fetchone()
+            self.assertEqual(attempt["status"], "blocked")
+            self.assertEqual(attempt["reason"], "exit_signal_expired")
 
     def test_big_gap_open_still_fills_and_same_day_stop_sells_t0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

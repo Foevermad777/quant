@@ -87,7 +87,15 @@ def _insert_analysis(conn: sqlite3.Connection, row_id: int, code: str, advice: s
     )
 
 
-def _insert_signal(conn: sqlite3.Connection, row_id: int, code: str, action: str, source_report_id: int) -> None:
+def _insert_signal(
+    conn: sqlite3.Connection,
+    row_id: int,
+    code: str,
+    action: str,
+    source_report_id: int,
+    *,
+    expires_at: str | None = "2026-07-15 15:00:00",
+) -> None:
     conn.execute(
         """
         insert into decision_signals(
@@ -96,10 +104,10 @@ def _insert_signal(conn: sqlite3.Connection, row_id: int, code: str, action: str
             metadata_json, market, source_type, source_agent, plan_quality
         )
         values (?, ?, ?, ?, 0.8, 12.0, 10.0, 9.0, 15.0, 'active',
-                '2026-07-08 10:00:00', '2026-07-15 15:00:00', ?,
+                '2026-07-08 10:00:00', ?, ?,
                 ?, 'cn', 'analysis', 'test', 'ok')
         """,
-        (row_id, code, code, action, source_report_id, json.dumps({})),
+        (row_id, code, code, action, expires_at, source_report_id, json.dumps({})),
     )
 
 
@@ -126,6 +134,8 @@ def _insert_disciplined_signal(
     action: str,
     source_report_id: int,
     payload: dict,
+    *,
+    expires_at: str | None = "2026-07-15 15:00:00",
 ) -> None:
     conn.execute(
         """
@@ -137,12 +147,12 @@ def _insert_disciplined_signal(
             completion_payload_json, gate_accepted, gate_action, gate_reasons_json
         )
         values (?, ?, ?, ?, 'cn', ?, 0.8, 12.0, 10.0, 9.0, 15.0,
-                'active', '2026-07-08 10:00:00', '2026-07-15 15:00:00',
+                'active', '2026-07-08 10:00:00', ?,
                 'ok', 'g5-discipline-v0.1', 'g5-minimal-v0.1',
                 '2026-07-08 10:05:00', '2026-07-08 10:05:00',
                 'gemini-3.5-flash', ?, 1, 'pass', '[]')
         """,
-        (source_signal_id, source_report_id, code, code, action, json.dumps(payload, ensure_ascii=False)),
+        (source_signal_id, source_report_id, code, code, action, expires_at, json.dumps(payload, ensure_ascii=False)),
     )
 
 
@@ -310,6 +320,43 @@ class SignalReaderTests(unittest.TestCase):
             self.assertEqual(cn_codes, ["600519"])
             self.assertEqual(us_codes, ["AAPL"])
             self.assertNotIn("AAPL", cn_codes)
+
+    def test_reader_excludes_expired_signals_in_disciplined_branch(self) -> None:
+        # Regression guard for the 2026-07 stale-signal leak: disciplined rows
+        # are never status-flipped after insert, so expiry must be enforced at
+        # selection time. Boundary: a plan expiring ON the execution date is
+        # still executable (mirrors LimitFillModel.expired_unfilled's strict >).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "disciplined.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(conn, 1, "600519", "buy", 1, {}, expires_at="2026-07-15 15:00:00")
+                _insert_disciplined_signal(conn, 2, "600036", "buy", 2, {}, expires_at="2026-07-16 01:00:00")
+                _insert_disciplined_signal(conn, 3, "600900", "buy", 3, {}, expires_at=None)
+
+            reader = SignalReader(dsa_path, disciplined_path, market="cn")
+            codes = [s.stock_code for s in reader.active_signals_before(date(2026, 7, 16))]
+
+            self.assertEqual(codes, ["600036", "600900"])
+            self.assertNotIn("600519", codes)
+
+    def test_reader_excludes_expired_signals_in_decision_signals_branch(self) -> None:
+        # Same guard for the raw decision_signals fallback path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_signal(conn, 1, "600519", "buy", 1, expires_at="2026-07-15 15:00:00")
+                _insert_signal(conn, 2, "600036", "buy", 2, expires_at="2026-07-16 01:00:00")
+                _insert_signal(conn, 3, "600900", "buy", 3, expires_at=None)
+
+            reader = SignalReader(dsa_path, market="cn", use_disciplined_signals=False)
+            codes = [s.stock_code for s in reader.active_signals_before(date(2026, 7, 16))]
+
+            self.assertEqual(codes, ["600036", "600900"])
+            self.assertNotIn("600519", codes)
 
     def test_reader_isolates_market_in_decision_signals_branch(self) -> None:
         # Same guard for the raw decision_signals fallback path (no disciplined store).

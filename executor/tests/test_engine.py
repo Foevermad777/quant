@@ -72,6 +72,7 @@ def _insert_signal(
     *,
     entry_high: float = 12.0,
     stop_loss: float | None = None,
+    expires_at: str | None = "2026-07-10 15:00:00",
 ) -> None:
     conn.execute(
         """
@@ -81,10 +82,10 @@ def _insert_signal(
             metadata_json, market, source_type, source_agent, plan_quality
         )
         values (?, ?, ?, ?, 0.8, ?, 10.0, ?, null, 'active',
-                '2026-07-05 12:00:00', '2026-07-10 15:00:00', ?,
+                '2026-07-05 12:00:00', ?, ?,
                 ?, 'cn', 'analysis', 'test', 'ok')
         """,
-        (row_id, code, code, action, entry_high, stop_loss, source_report_id, json.dumps({})),
+        (row_id, code, code, action, entry_high, stop_loss, expires_at, source_report_id, json.dumps({})),
     )
 
 
@@ -274,6 +275,70 @@ class EngineTests(unittest.TestCase):
 
         self.assertEqual(stats["sells"], 1)
         self.assertEqual(position["quantity"], 500)
+
+    def test_expired_sell_signal_never_reaches_exit_candidates(self) -> None:
+        # Layer 1 of the stale-signal guard: the reader must not surface an
+        # expired sell signal, so a held position is never sold off a stale plan.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600519", "卖出", "2026-07-05 12:00:00")
+                _insert_signal(conn, 1, "600519", "sell", 1, expires_at="2026-07-05 15:00:00")
+                _insert_bar(conn, "600519", "2026-07-05", 10.0, 10.0)
+                _insert_bar(conn, "600519", "2026-07-06", 11.0, 11.5)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600519",),
+            )
+            ledger = PaperLedger(ledger_path, config=config)
+            _seed_position(ledger)
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["exit_candidates"], 0)
+            self.assertEqual(stats["sells"], 0)
+            self.assertEqual(engine.ledger.position("600519")["quantity"], 1000)
+
+    def test_engine_backstop_blocks_stale_exit_signal(self) -> None:
+        # Layer 2 (defense in depth): even if a stale exit signal slips past the
+        # reader (future regression), the engine must block it, never sell.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600519", "卖出", "2026-07-05 12:00:00")
+                _insert_signal(conn, 1, "600519", "sell", 1, expires_at="2026-07-05 15:00:00")
+                _insert_bar(conn, "600519", "2026-07-05", 10.0, 10.0)
+                _insert_bar(conn, "600519", "2026-07-06", 11.0, 11.5)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600519",),
+            )
+            ledger = PaperLedger(ledger_path, config=config)
+            _seed_position(ledger)
+            engine = PaperEngine(config)
+            stale = engine.reader.get_signal(1)
+            engine.reader.exit_candidates = lambda execution_date, held_symbols=None: [stale]
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["sells"], 0)
+            self.assertEqual(stats["blocked"], 1)
+            self.assertEqual(engine.ledger.position("600519")["quantity"], 1000)
+            with engine.ledger._connect() as conn:
+                attempt = conn.execute(
+                    "select status, reason from order_attempts where stock_code = '600519'"
+                ).fetchone()
+            self.assertEqual(attempt["status"], "blocked")
+            self.assertEqual(attempt["reason"], "exit_signal_expired")
 
     def test_run_day_limit_up_block_pending_exit_and_settlement_chain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

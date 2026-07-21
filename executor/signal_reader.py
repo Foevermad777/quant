@@ -137,6 +137,11 @@ class SignalReader:
         return self._row_to_signal(row)
 
     def active_signals_before(self, execution_date: date) -> List[DecisionSignal]:
+        # Expiry boundary: a plan stays executable through date(expires_at) and
+        # must never be selected after it (mirrors *FillModel.expired_unfilled).
+        # `status = 'active'` alone is not enough — disciplined_signals rows are
+        # never status-flipped after insert, so without this predicate every
+        # stale plan re-enters selection forever (2026-07 stale-signal leak).
         if self.has_disciplined_signal_store():
             with self._connect_disciplined() as conn:
                 rows = conn.execute(
@@ -148,9 +153,15 @@ class SignalReader:
                       and market = ?
                       and date(created_at) < ?
                       and (completed_at is null or date(completed_at) < ?)
+                      and (expires_at is null or date(expires_at) >= ?)
                     order by datetime(created_at), source_signal_id
                     """,
-                    (self.market, execution_date.isoformat(), execution_date.isoformat()),
+                    (
+                        self.market,
+                        execution_date.isoformat(),
+                        execution_date.isoformat(),
+                        execution_date.isoformat(),
+                    ),
                 ).fetchall()
             return [self._row_to_disciplined_signal(row) for row in rows]
 
@@ -162,9 +173,10 @@ class SignalReader:
                 where status = 'active'
                   and market = ?
                   and date(created_at) < ?
+                  and (expires_at is null or date(expires_at) >= ?)
                 order by datetime(created_at), id
                 """,
-                (self.market, execution_date.isoformat()),
+                (self.market, execution_date.isoformat(), execution_date.isoformat()),
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 

@@ -231,7 +231,15 @@ class DisciplineCompletionTests(unittest.TestCase):
             self.assertEqual(fake_client.calls, 1)
 
             reader = SignalReader(dsa_path, store_path)
-            signals = reader.active_signals_before(date(2100, 1, 1))
+            # Normalize the wall-clock completion stamp so the read happens on a
+            # realistic execution date inside the signal's validity window
+            # (created 07-07, expires 07-10). The previous far-future read date
+            # is no longer valid: expired signals are filtered at selection.
+            with sqlite3.connect(store_path) as conn:
+                conn.execute(
+                    "update disciplined_signals set completed_at = '2026-07-07 08:10:00' where source_signal_id = 18"
+                )
+            signals = reader.active_signals_before(date(2026, 7, 9))
             self.assertEqual([signal.id for signal in signals], [18])
             self.assertEqual(signals[0].source_type, "disciplined_signal")
             self.assertEqual(signals[0].confidence, 0.52)

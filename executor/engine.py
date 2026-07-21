@@ -390,6 +390,19 @@ class PaperEngine:
         candidates = self.reader.exit_candidates(execution_date, held_symbols=self._held_symbols())
         stats["exit_candidates"] = len(candidates)
         for signal in candidates:
+            # Defense in depth: the reader already filters expired signals, but a
+            # stale sell/reduce must never trigger a real sale (mirrors the
+            # expiry backstop on the open path above).
+            if signal.expires_at is not None and execution_date > signal.expires_at.date():
+                self.ledger.record_order_attempt(
+                    signal_id=signal.id,
+                    stock_code=signal.stock_code,
+                    trade_date=execution_date,
+                    status="blocked",
+                    reason="exit_signal_expired",
+                )
+                stats["blocked"] += 1
+                continue
             position = self.ledger.position(signal.stock_code)
             if position is None:
                 self.ledger.record_event(

@@ -142,6 +142,12 @@ class UsSignalReader:
         return self._row_to_signal(row)
 
     def active_signals_before(self, execution_date: date) -> List[DecisionSignal]:
+        # Expiry boundary: a plan stays executable through date(expires_at) and
+        # must never be selected after it (mirrors *FillModel.expired_unfilled).
+        # `status = 'active'` alone is not enough — disciplined_signals rows are
+        # never status-flipped after insert, so without this predicate every
+        # stale plan re-enters selection forever (2026-07 stale-signal leak).
+        # Mirrors executor/signal_reader.py.
         placeholders = self._pool_placeholders()
         if self.has_disciplined_signal_store():
             with self._connect_disciplined() as conn:
@@ -154,9 +160,10 @@ class UsSignalReader:
                       and gate_accepted = 1
                       and market = ?
                       and stock_code in ({placeholders})
+                      and (expires_at is null or date(expires_at) >= ?)
                     order by datetime(created_at), source_signal_id
                     """,
-                    self._market_pool_params(),
+                    (*self._market_pool_params(), execution_date.isoformat()),
                 ).fetchall()
             return [
                 self._row_to_disciplined_signal(row)
@@ -173,9 +180,10 @@ class UsSignalReader:
                   and date(created_at) < ?
                   and market = ?
                   and stock_code in ({placeholders})
+                  and (expires_at is null or date(expires_at) >= ?)
                 order by datetime(created_at), id
                 """,
-                self._market_pool_params(execution_date.isoformat()),
+                (*self._market_pool_params(execution_date.isoformat()), execution_date.isoformat()),
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 
