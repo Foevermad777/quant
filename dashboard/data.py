@@ -10,6 +10,13 @@ from typing import Any, Iterable, Sequence
 CN_POOL = ("600519", "300750", "601318", "600036", "600900")
 US_POOL = ("AAPL", "NVDA", "MSFT", "JPM", "SPCX")
 
+# A signal is genuinely live only if it is active AND not past its expiry day.
+# Mirrors executor/signal_reader.py and executor/us/signal_reader_us.py so the
+# dashboard reports what the executors would actually act on.
+_UNEXPIRED_PREDICATE = (
+    "status = 'active' and (expires_at is null or date(expires_at) >= date('now', 'localtime'))"
+)
+
 
 @dataclass(frozen=True)
 class DashboardPaths:
@@ -128,9 +135,14 @@ def scan_summary(db_path: Path) -> dict[str, Any]:
 
             if _table_exists(conn, "decision_signals"):
                 summary["counts"]["decision_signals"] = _scalar_int(conn, "select count(*) from decision_signals")
+                # status alone lags reality (the DSA batch flips it after the
+                # fact), so an "active" count can include already-expired
+                # plans. expires_at is the truth the executors act on; keep the
+                # dashboard on the same predicate. Boundary matches the readers:
+                # still valid through the expiry day.
                 summary["counts"]["active_signals"] = _scalar_int(
                     conn,
-                    "select count(*) from decision_signals where status = 'active'",
+                    f"select count(*) from decision_signals where {_UNEXPIRED_PREDICATE}",
                 )
                 summary["latest_signal_at"] = _scalar(conn, "select max(created_at) from decision_signals")
                 summary["recent_signals"] = _rows(
@@ -147,10 +159,10 @@ def scan_summary(db_path: Path) -> dict[str, Any]:
                 )
                 summary["active_signals_by_market_action"] = _rows(
                     conn,
-                    """
+                    f"""
                     select market, action, count(*) as count
                     from decision_signals
-                    where status = 'active'
+                    where {_UNEXPIRED_PREDICATE}
                     group by market, action
                     order by market, action
                     """,

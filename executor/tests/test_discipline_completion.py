@@ -8,6 +8,7 @@ from pathlib import Path
 
 from executor.discipline_completion import (
     DisciplineCompleter,
+    DisciplinedSignalStore,
     G5CircuitBreaker,
     GeminiUsage,
     RoutedStructuredClient,
@@ -204,6 +205,49 @@ class SlowGeminiClient(FakeGeminiClient):
         time.sleep(self.delay_seconds)
         with self._lock:
             return super().generate_json(prompt, schema)
+
+
+class DisciplinedSignalStoreExpiryTests(unittest.TestCase):
+    def test_expire_stale_flips_only_past_expiry_rows(self) -> None:
+        # status was written once at save() and never refreshed, so every row
+        # ever stored read 'active'. Sweep must flip only rows past their expiry
+        # day, keep the expiry-day row live, and leave null-expiry rows alone.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = DisciplinedSignalStore(Path(tmpdir) / "paper.db")
+            store.initialize()
+            with store._connect() as conn:
+                for sid, expires in ((1, "2026-07-15 15:00:00"), (2, "2026-07-16 01:00:00"), (3, None)):
+                    conn.execute(
+                        """
+                        insert into disciplined_signals(
+                            source_signal_id, source_report_id, stock_code, stock_name, market,
+                            action, status, created_at, expires_at, schema_version,
+                            completion_version, completed_at, updated_at, model,
+                            scenarios_json, invalid_conditions_json, source_attribution_json,
+                            single_side_flag, completion_payload_json, raw_dsa_signal_json,
+                            dsa_analysis_json, dated_news_json, undated_news_json,
+                            guardrail_json, gate_accepted, gate_action, gate_reasons_json
+                        )
+                        values (?, ?, '600519', '600519', 'cn', 'buy', 'active',
+                                '2026-07-08 10:00:00', ?, 'g5-discipline-v0.1', 'g5-minimal-v0.1',
+                                '2026-07-08 10:05:00', '2026-07-08 10:05:00', 'gemini-3.5-flash',
+                                '{}', '[]', '[]', 0, '{}', '{}', '{}', '[]', '[]', '{}', 1, 'pass', '[]')
+                        """,
+                        (sid, sid, expires),
+                    )
+
+            flipped = store.expire_stale(as_of=date(2026, 7, 16))
+
+            self.assertEqual(flipped, 1)
+            with store._connect() as conn:
+                got = dict(
+                    conn.execute(
+                        "select source_signal_id, status from disciplined_signals order by source_signal_id"
+                    ).fetchall()
+                )
+            self.assertEqual(got, {1: "expired", 2: "active", 3: "active"})
+
+            self.assertEqual(store.expire_stale(as_of=date(2026, 7, 16)), 0)
 
 
 class DisciplineCompletionTests(unittest.TestCase):

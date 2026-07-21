@@ -69,7 +69,8 @@ def _init_dsa(path: Path) -> None:
                 id, stock_code, stock_name, market, action, confidence, score,
                 plan_quality, status, reason, created_at, expires_at
             ) values
-                (1, '600519', '贵州茅台', 'cn', 'watch', 0.6, 55, 'complete', 'active', '等待', '2026-07-08 10:01:00', '2026-07-09 15:00:00');
+                (1, '600519', '贵州茅台', 'cn', 'watch', 0.6, 55, 'complete', 'active', '等待', '2026-07-08 10:01:00', '2999-01-01 15:00:00'),
+                (2, '300750', '宁德时代', 'cn', 'buy', 0.7, 62, 'complete', 'active', '过期计划', '2026-07-08 10:02:00', '2026-07-09 15:00:00');
             """
         )
 
@@ -200,7 +201,14 @@ class DashboardDataTests(unittest.TestCase):
             overview = build_overview(paths)
 
             self.assertEqual(overview["scan"]["counts"]["analysis_history"], 2)
+            # Two rows carry status='active'; the 07-09 one is long expired and
+            # must not be counted as live (the executors would never act on it).
+            self.assertEqual(overview["scan"]["counts"]["decision_signals"], 2)
             self.assertEqual(overview["scan"]["counts"]["active_signals"], 1)
+            self.assertEqual(
+                [row["action"] for row in overview["scan"]["active_signals_by_market_action"]],
+                ["watch"],
+            )
             self.assertEqual(overview["scan"]["market_reviews"][0]["code"], "MARKET")
             self.assertEqual(overview["scan"]["pool_analysis"]["cn"][0]["code"], "600519")
             self.assertEqual(overview["executors"]["cn"]["latest_snapshot"]["total_value"], 1005000)

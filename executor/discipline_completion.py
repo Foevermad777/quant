@@ -4,13 +4,14 @@ import argparse
 import json
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import datetime, time as datetime_time, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -441,6 +442,33 @@ class DisciplinedSignalStore:
                 ).fetchone()
             except sqlite3.OperationalError:
                 return None
+
+    def expire_stale(self, *, as_of: Optional[date] = None) -> int:
+        """Flip status to 'expired' for rows past their expiry day.
+
+        `status` is written once at save() time and was never refreshed, so it
+        stayed 'active' for every row ever stored — worthless as a validity
+        predicate and misleading on the dashboard. `expires_at` remains the
+        single source of truth (the readers enforce it directly); this only
+        stops the mirrored column from lying. Boundary matches the readers and
+        *FillModel.expired_unfilled: still valid through the expiry day.
+        """
+        today = (as_of or date.today()).isoformat()
+        with self._connect() as conn:
+            try:
+                cursor = conn.execute(
+                    """
+                    update disciplined_signals
+                    set status = 'expired'
+                    where status = 'active'
+                      and expires_at is not null
+                      and date(expires_at) < ?
+                    """,
+                    (today,),
+                )
+            except sqlite3.OperationalError:
+                return 0
+            return int(cursor.rowcount or 0)
 
     def save(
         self,
@@ -1534,6 +1562,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         slow_threshold_ms=max(1, args.slow_threshold_ms),
         primary_failure_threshold=max(1, args.primary_failure_threshold),
     )
+    completer.store.initialize()
+    expired = completer.store.expire_stale()
+    if expired:
+        print(f"expire_stale rows={expired}", file=sys.stderr)
     signal_ids = list(args.signal_ids or [])
     if args.all_active:
         signal_ids.extend(completer.loader.active_signal_ids(args.stock_codes, market=args.market))
