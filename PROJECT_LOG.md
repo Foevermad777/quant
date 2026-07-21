@@ -113,3 +113,18 @@
 - **验证（对照组+真实形状）**：生产 DB 副本重放 07-20——旧代码（HEAD 47c3526）逐字复现生产（CN blocked 72/79/91、US blocked 64/67/86、s1_conflicts 21/34）；修复代码零陈旧候选、blocked=0、s1_conflicts 降至 3/5（纯当天窗口）。正向对照：07-17（按符号最新计划均在窗口内的一天）新旧候选集完全一致（72/79/91/93，含实际成交的 93）→无过度过滤。新守卫测试 8 个（reader 双路径排除过期+当天到期边界、引擎双层卖出防线，CN/US 对称）；全量回归 executor 120 + ops 18 全绿（1 处旧断言用 date(2100) 当"读全部"哨兵，与过期语义冲突，已改为窗口内真实日期）。测试隔离修正：新增 US 引擎测试曾漏传 `disciplined_db_path` 落到生产库默认值，已显式隔离。
 - **归因修正（诚实记账）**：07-20"US 本该成交 2 笔"的说法不成立——即使无此 bug，当天有效信号（104/107 AAPL/JPM，session low 落在区间内）也会被 S1 `position_context_split` 丢弃，成交不了。本 bug 的实际代价=幽灵挂单噪音+误导性 reason+s1_conflicts 膨胀+卖出路径的未爆雷，而非直接踏空。**S1 对 `position_context_split` 的丢弃判定是下一个议题**（待 CEO 讨论）。
 - **修复后预演**：今晚 CN 18:40 将只见窗口内信号（open: #112 601318 buy 50.25-51.0，到期 07-23）；明晨 US 05:30 open: #118 JPM buy 335.1-337.0。`disciplined_signals` 的 status 死数据问题记为后续项（可在 discipline_completion 加过期翻转，非紧急——reader 已以 expires_at 为真值）。
+- **三项遗留清理（commit f9d1a2a + 本条分析）**：
+  - **① disciplined status 死数据（已修）**：`status` 在 save() 时写死、从不刷新 → CN 59/59、US 54/54 全是 'active'，零信息量且污染 dashboard 与 redteam 计数。新增 `DisciplinedSignalStore.expire_stale()`，日跑 discipline completion 前 sweep。生产副本验证：CN 59→6、US 54→10，**恰好等于上游 decision_signals 的 active 计数（6/10），两库自此对齐**。
+  - **② dashboard 陈旧噪音（已修）**：`decision_signals.status` 上游有维护但**滞后**（今日 104/106/107 已过期仍标 active），两处计数查询改用共享 `_UNEXPIRED_PREDICATE`（与 reader 同语义）。
+  - **③ S1 `position_context_split` 丢弃 —— 根因定性完成，改动待 CEO 决策**（详见下条）。
+
+- **S1 taxonomy 碰撞：`conditional_entry` 被 94% 误标为 `position_context_split`（2026-07-21 定性）**
+  - **恒定输出实锤**：41 条 G5 信号（07-15 起，双市场）中 `flat_account_action` **无一例外全是 `watch`**、`resolved_action` **全是 `watch`**、`holding_action` 除 reduce 外全是 `hold`。核对完整 payload 确认**不是静默兜底**——`conflict_reason` 是有具体内容的真实 LLM 输出（如 JPM #107 明确写"空仓者等待企稳后在 335-338 支撑区间逢低分批吸纳"）。
+  - **两处独立成因**：①**Prompt 规则碰撞**：`discipline_completion` 提示词规则 9（"持仓者持有 + 空仓者等回调 → position_context_split"）与规则 10（"只在回调/分批时买 → conditional_entry"）**描述的是同一段文本**，规则 9 在前且更具体，LLM 稳定选它。②**派生分类器优先级**：`classify_conflict_status` 把 position_context_split 判在 conditional_entry 之前，且条件 `flat != holding and holding in NEUTRAL|EXIT` 对 (watch, hold) 恒真 → 派生路径也永远到不了 conditional_entry。
+  - **量化**：被判 PCS 的 buy 信号 16 条中 **15 条（94%）的 reason 明确在说"回调到区间再买"**（命中 逢低/回踩/分批/pullback/wait for/支撑位 等措辞）。即 C 计划（07-16 落地）**一直只跑在约 6% 的预期流量上，从未被真正检验过**。
+  - **A/B 端到端实测（真引擎逐日重放 07-14~07-20，全新账本，走完整 `_latest_by_symbol`/撮合/止损/仓位上限）**：
+    - **现行代码**：CN 4 笔成交 **+0.95%**；US 6 笔成交 **+0.79%**。→ **关键结论：过期修复本身已经把美股执行能力解冻了**，生产两周零成交 = C 计划 07-16 才落地（对那批 07-13 信号晚了两天）+ 过期 bug 把执行器永久锁死在那批陈旧信号上，**不是结构性瘫痪**。
+    - **解禁 PCS**：CN **零变化**（#83 被 #93 经 `_latest_by_symbol` 取代，非净增）；US 6→10 笔但权益 **+0.79% → +0.32%**，新增的 NVDA 208 买入次日 199 止损（-4.3%），正是纪律层要防的接飞刀。
+  - **裁定**：**不解禁 PCS**。样本极小（2 周、单边行情、新增 3 笔）不足以下结论，但没有任何证据支持放松闸门，且 in-sample 为负。`hard_conflict` 桶仍有效（#109 588200 是真正的"分析明确建议观望"），说明 taxonomy 的安全网没坏。
+  - **真正该修的是源头标签**：把规则 9/10 的从属关系理顺——**判据应为"空仓者是否拿到了带价格条件的可执行入场计划"**：有 → `conditional_entry`；无（空仓者应完全回避）→ `position_context_split`。但注意：修好标签会让这 15 条转为 conditional_entry 并被 C 计划接纳，**效果与解禁 PCS 高度接近**，因此必须先 shadow。
+  - **建议路径（待 CEO 拍板）**：沿用 B 方案既定纪律——先 **shadow 双写**（只记录"若标签修正会促成哪些挂单/成交"，不实际执行）累积 ≥10 交易日，与实际成交对照评估限价成交率/踏空率/接飞刀率，再决定是否切换。在此之前 C 计划继续以现有 6% 流量运行。
