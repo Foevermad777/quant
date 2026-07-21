@@ -228,6 +228,21 @@ class UsSignalReaderTests(unittest.TestCase):
             self.assertEqual([signal.market for signal in signals], ["us"])
             self.assertEqual(signals[0].source_type, "disciplined_signal")
 
+    def test_reader_sets_sqlite_busy_timeout(self) -> None:
+        # paper_us.db is written by the G5 completion (WAL); without a busy
+        # timeout a concurrent write can surface "database is locked" on read.
+        # Mirrors executor/tests/test_signal_reader.py.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_path = Path(tmpdir) / "paper_us.db"
+            with sqlite3.connect(store_path) as conn:
+                conn.execute("create table disciplined_signals(source_signal_id integer primary key)")
+            reader = UsSignalReader(Path(tmpdir) / "dsa.db", store_path, sqlite_timeout_seconds=0.25)
+
+            with reader._connect_disciplined() as conn:
+                row = conn.execute("pragma busy_timeout").fetchone()
+
+            self.assertEqual(row[0], 250)
+
     def test_reader_excludes_expired_signals_in_disciplined_branch(self) -> None:
         # Regression guard for the 2026-07 stale-signal leak: disciplined rows
         # are never status-flipped after insert, so expiry must be enforced at

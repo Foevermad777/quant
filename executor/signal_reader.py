@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
+from executor.config import CN_MARKET, CN_STOCK_POOL
 from executor.intent_resolution import (
     action_group as _action_group,
     advice_to_action,
@@ -70,6 +72,11 @@ def _loads_json(text: Any) -> Dict[str, Any]:
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 10.0
 
+CN_MARKET_TZ = ZoneInfo("Asia/Shanghai")
+LOCAL_RUNTIME_TZ = ZoneInfo("Asia/Shanghai")
+CN_REGULAR_OPEN_TIME = time(9, 30, 0)
+TEMPORAL_COLUMNS = ("decision_timestamp", "market_phase", "data_asof", "bar_cutoff", "news_cutoff")
+
 
 class SignalReader:
     def __init__(
@@ -77,7 +84,8 @@ class SignalReader:
         db_path: Path,
         disciplined_db_path: Optional[Path] = None,
         *,
-        market: str = "cn",
+        stock_pool: Sequence[str] = CN_STOCK_POOL,
+        market: str = CN_MARKET,
         use_disciplined_signals: bool = True,
         sqlite_timeout_seconds: float = SQLITE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
@@ -90,8 +98,18 @@ class SignalReader:
         self.market = str(market).strip().lower()
         if not self.market:
             raise ValueError("SignalReader market must not be empty")
+        # Pool boundary: DSA can emit signals for symbols outside the executor's
+        # pool (e.g. one-off analyses); without this filter such a signal would
+        # be traded the moment stock_daily carries a bar for it. Mirrors the US
+        # reader.
+        self.stock_pool = tuple(dict.fromkeys(stock_pool))
+        if not self.stock_pool:
+            raise ValueError("SignalReader stock_pool must not be empty")
         self.use_disciplined_signals = use_disciplined_signals
         self.sqlite_timeout_seconds = sqlite_timeout_seconds
+
+    def _pool_placeholders(self) -> str:
+        return ",".join("?" for _ in self.stock_pool)
 
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self.db_path}?mode=ro"
@@ -142,41 +160,42 @@ class SignalReader:
         # `status = 'active'` alone is not enough — disciplined_signals rows are
         # never status-flipped after insert, so without this predicate every
         # stale plan re-enters selection forever (2026-07 stale-signal leak).
+        placeholders = self._pool_placeholders()
         if self.has_disciplined_signal_store():
             with self._connect_disciplined() as conn:
+                columns = {row["name"] for row in conn.execute("pragma table_info(disciplined_signals)").fetchall()}
                 rows = conn.execute(
-                    """
+                    f"""
                     select *
                     from disciplined_signals
                     where status = 'active'
                       and gate_accepted = 1
                       and market = ?
-                      and date(created_at) < ?
-                      and (completed_at is null or date(completed_at) < ?)
+                      and stock_code in ({placeholders})
                       and (expires_at is null or date(expires_at) >= ?)
                     order by datetime(created_at), source_signal_id
                     """,
-                    (
-                        self.market,
-                        execution_date.isoformat(),
-                        execution_date.isoformat(),
-                        execution_date.isoformat(),
-                    ),
+                    (self.market, *self.stock_pool, execution_date.isoformat()),
                 ).fetchall()
-            return [self._row_to_disciplined_signal(row) for row in rows]
+            return [
+                self._row_to_disciplined_signal(row)
+                for row in rows
+                if _disciplined_row_available_before(row, execution_date, columns)
+            ]
 
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 select *
                 from decision_signals
                 where status = 'active'
                   and market = ?
+                  and stock_code in ({placeholders})
                   and date(created_at) < ?
                   and (expires_at is null or date(expires_at) >= ?)
                 order by datetime(created_at), id
                 """,
-                (self.market, execution_date.isoformat(), execution_date.isoformat()),
+                (self.market, *self.stock_pool, execution_date.isoformat(), execution_date.isoformat()),
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 
@@ -378,10 +397,15 @@ class SignalReader:
         return self._row_to_bar(row) if row is not None else None
 
     def bars_on(self, day: date) -> Dict[str, DailyBar]:
+        placeholders = self._pool_placeholders()
         with self._connect() as conn:
             rows = conn.execute(
-                "select code, date, open, high, low, close, volume, amount, pct_chg from stock_daily where date = ?",
-                (day.isoformat(),),
+                f"""
+                select code, date, open, high, low, close, volume, amount, pct_chg
+                from stock_daily
+                where date = ? and code in ({placeholders})
+                """,
+                (day.isoformat(), *self.stock_pool),
             ).fetchall()
         return {row["code"]: self._row_to_bar(row) for row in rows}
 
@@ -443,15 +467,18 @@ class SignalReader:
         return rows
 
     def signals_between(self, start: date, end: date) -> List[DecisionSignal]:
+        placeholders = self._pool_placeholders()
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 select *
                 from decision_signals
                 where date(created_at) between ? and ?
+                  and market = ?
+                  and stock_code in ({placeholders})
                 order by datetime(created_at), id
                 """,
-                (start.isoformat(), end.isoformat()),
+                (start.isoformat(), end.isoformat(), self.market, *self.stock_pool),
             ).fetchall()
         return [self._row_to_signal(row) for row in rows]
 
@@ -571,3 +598,40 @@ def _row_intent_resolution(row: sqlite3.Row, metadata: Dict[str, Any]) -> Dict[s
         "conflict_reason": _row_value(row, "conflict_reason") or metadata.get("conflict_reason"),
     }
     return {key: value for key, value in resolution.items() if value not in (None, "")}
+
+
+def _disciplined_row_available_before(row: sqlite3.Row, execution_date: date, columns: set[str]) -> bool:
+    # Temporal availability, mirroring executor/us/signal_reader_us.py: when
+    # the row carries point-in-time metadata, require data_asof strictly before
+    # the execution date and completion before the CN session open; otherwise
+    # fall back to the legacy calendar-date rule (created and completed on an
+    # earlier date). Without the temporal path, CN could admit a row whose
+    # data_asof already includes the execution date (look-ahead).
+    if all(column in columns for column in TEMPORAL_COLUMNS):
+        data_asof = parse_date(_row_value(row, "data_asof"))
+        if data_asof is not None:
+            if data_asof >= execution_date:
+                return False
+            completed_utc = _as_utc(parse_datetime(_row_value(row, "completed_at")))
+            open_utc = _cn_regular_open_utc(execution_date)
+            return completed_utc is None or completed_utc < open_utc
+    return _legacy_row_date_before(row, "created_at", execution_date) and (
+        _row_value(row, "completed_at") in (None, "") or _legacy_row_date_before(row, "completed_at", execution_date)
+    )
+
+
+def _legacy_row_date_before(row: sqlite3.Row, key: str, execution_date: date) -> bool:
+    parsed = parse_date(_row_value(row, key))
+    return parsed is not None and parsed < execution_date
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=LOCAL_RUNTIME_TZ)
+    return value.astimezone(timezone.utc)
+
+
+def _cn_regular_open_utc(execution_date: date) -> datetime:
+    return datetime.combine(execution_date, CN_REGULAR_OPEN_TIME, tzinfo=CN_MARKET_TZ).astimezone(timezone.utc)

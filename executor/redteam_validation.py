@@ -316,10 +316,11 @@ def audit_temporal_gate(
     dates = _trading_dates(config.dsa_db_path, min_date=start, max_date=end)
     if not dates and start <= end:
         dates = [start]
-    raw_reader = SignalReader(config.dsa_db_path, use_disciplined_signals=False)
+    raw_reader = SignalReader(config.dsa_db_path, stock_pool=config.stock_pool, use_disciplined_signals=False)
     disciplined_reader = SignalReader(
         config.dsa_db_path,
         config.disciplined_db_path or config.ledger_db_path,
+        stock_pool=config.stock_pool,
         use_disciplined_signals=True,
     )
     raw_violations = _temporal_reader_violations(raw_reader, dates, "raw")

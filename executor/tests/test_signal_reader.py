@@ -46,10 +46,21 @@ def _init_dsa_db(path: Path) -> None:
         )
 
 
-def _init_disciplined_db(path: Path) -> None:
+def _init_disciplined_db(path: Path, *, temporal_columns: bool = False) -> None:
+    temporal = (
+        """
+                decision_timestamp text,
+                market_phase text,
+                data_asof text,
+                bar_cutoff text,
+                news_cutoff text,
+        """
+        if temporal_columns
+        else ""
+    )
     with sqlite3.connect(path) as conn:
         conn.executescript(
-            """
+            f"""
             create table disciplined_signals (
                 source_signal_id integer primary key,
                 source_report_id integer,
@@ -65,6 +76,7 @@ def _init_disciplined_db(path: Path) -> None:
                 status text not null,
                 created_at text,
                 expires_at text,
+                {temporal}
                 plan_quality text,
                 schema_version text not null,
                 completion_version text not null,
@@ -136,24 +148,28 @@ def _insert_disciplined_signal(
     payload: dict,
     *,
     expires_at: str | None = "2026-07-15 15:00:00",
+    completed_at: str = "2026-07-08 10:05:00",
+    data_asof: str | None = None,
 ) -> None:
-    conn.execute(
-        """
-        insert into disciplined_signals(
-            source_signal_id, source_report_id, stock_code, stock_name, market,
-            action, confidence, entry_high, entry_low, stop_loss, target_price,
-            status, created_at, expires_at, plan_quality, schema_version,
-            completion_version, completed_at, updated_at, model,
-            completion_payload_json, gate_accepted, gate_action, gate_reasons_json
-        )
-        values (?, ?, ?, ?, 'cn', ?, 0.8, 12.0, 10.0, 9.0, 15.0,
-                'active', '2026-07-08 10:00:00', ?,
-                'ok', 'g5-discipline-v0.1', 'g5-minimal-v0.1',
-                '2026-07-08 10:05:00', '2026-07-08 10:05:00',
-                'gemini-3.5-flash', ?, 1, 'pass', '[]')
-        """,
-        (source_signal_id, source_report_id, code, code, action, expires_at, json.dumps(payload, ensure_ascii=False)),
+    columns = (
+        "source_signal_id, source_report_id, stock_code, stock_name, market, "
+        "action, confidence, entry_high, entry_low, stop_loss, target_price, "
+        "status, created_at, expires_at, plan_quality, schema_version, "
+        "completion_version, completed_at, updated_at, model, "
+        "completion_payload_json, gate_accepted, gate_action, gate_reasons_json"
     )
+    values = (
+        source_signal_id, source_report_id, code, code, "cn",
+        action, 0.8, 12.0, 10.0, 9.0, 15.0,
+        "active", "2026-07-08 10:00:00", expires_at, "ok", "g5-discipline-v0.1",
+        "g5-minimal-v0.1", completed_at, completed_at, "gemini-3.5-flash",
+        json.dumps(payload, ensure_ascii=False), 1, "pass", "[]",
+    )
+    if data_asof is not None:
+        columns += ", decision_timestamp, market_phase, data_asof, bar_cutoff, news_cutoff"
+        values += (f"{data_asof} 07:00:00+00:00", "postclose", data_asof, f"{data_asof} 07:00:00+00:00", f"{data_asof} 07:00:00+00:00")
+    placeholders = ",".join("?" for _ in values)
+    conn.execute(f"insert into disciplined_signals({columns}) values ({placeholders})", values)
 
 
 class SignalReaderTests(unittest.TestCase):
@@ -315,7 +331,12 @@ class SignalReaderTests(unittest.TestCase):
                     )
 
             cn_codes = [s.stock_code for s in SignalReader(dsa_path, disciplined_path, market="cn").active_signals_before(date(2026, 7, 9))]
-            us_codes = [s.stock_code for s in SignalReader(dsa_path, disciplined_path, market="us").active_signals_before(date(2026, 7, 9))]
+            us_codes = [
+                s.stock_code
+                for s in SignalReader(
+                    dsa_path, disciplined_path, market="us", stock_pool=("AAPL",)
+                ).active_signals_before(date(2026, 7, 9))
+            ]
 
             self.assertEqual(cn_codes, ["600519"])
             self.assertEqual(us_codes, ["AAPL"])
@@ -357,6 +378,82 @@ class SignalReaderTests(unittest.TestCase):
 
             self.assertEqual(codes, ["600036", "600900"])
             self.assertNotIn("600519", codes)
+
+    def test_reader_filters_to_pool_in_disciplined_branch(self) -> None:
+        # Pool boundary guard: DSA can emit cn signals for symbols outside the
+        # executor pool (e.g. 588200); without the filter such a row is traded
+        # the moment stock_daily grows a bar for it.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "disciplined.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path)
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(conn, 1, "600519", "buy", 1, {})
+                _insert_disciplined_signal(conn, 2, "588200", "buy", 2, {})
+
+            reader = SignalReader(dsa_path, disciplined_path, market="cn")
+            codes = [s.stock_code for s in reader.active_signals_before(date(2026, 7, 9))]
+
+            self.assertEqual(codes, ["600519"])
+            self.assertNotIn("588200", codes)
+
+    def test_reader_filters_to_pool_in_decision_signals_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_signal(conn, 1, "600519", "buy", 1)
+                _insert_signal(conn, 2, "588200", "buy", 2)
+
+            reader = SignalReader(dsa_path, market="cn", use_disciplined_signals=False)
+            codes = [s.stock_code for s in reader.active_signals_before(date(2026, 7, 9))]
+
+            self.assertEqual(codes, ["600519"])
+            self.assertNotIn("588200", codes)
+
+    def test_bars_on_filters_to_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                conn.execute("create table stock_daily (code text, date text, open real, high real, low real, close real, volume real, amount real, pct_chg real)")
+                for code in ("600519", "588200"):
+                    conn.execute(
+                        "insert into stock_daily values (?, '2026-07-09', 10, 11, 9, 10.5, 1000, 10000, 0)",
+                        (code,),
+                    )
+
+            reader = SignalReader(dsa_path, market="cn")
+            bars = reader.bars_on(date(2026, 7, 9))
+
+            self.assertEqual(sorted(bars), ["600519"])
+
+    def test_disciplined_temporal_availability_mirrors_us_semantics(self) -> None:
+        # With point-in-time columns populated, availability must use them:
+        # data_asof covering the execution date is look-ahead and excluded;
+        # completion before the CN 09:30 open on the execution day is allowed
+        # (the legacy calendar rule would wrongly exclude it); completion after
+        # the open is excluded. Mirrors executor/us/signal_reader_us.py.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            disciplined_path = Path(tmpdir) / "disciplined.db"
+            _init_dsa_db(dsa_path)
+            _init_disciplined_db(disciplined_path, temporal_columns=True)
+            live_expiry = "2026-07-20 15:00:00"
+            with sqlite3.connect(disciplined_path) as conn:
+                _insert_disciplined_signal(conn, 1, "600519", "buy", 1, {}, expires_at=live_expiry, data_asof="2026-07-16")
+                _insert_disciplined_signal(conn, 2, "600036", "buy", 2, {}, expires_at=live_expiry, data_asof="2026-07-15", completed_at="2026-07-15 10:40:00")
+                _insert_disciplined_signal(conn, 3, "600900", "buy", 3, {}, expires_at=live_expiry, data_asof="2026-07-15", completed_at="2026-07-16 02:00:00")
+                _insert_disciplined_signal(conn, 4, "601318", "buy", 4, {}, expires_at=live_expiry, data_asof="2026-07-15", completed_at="2026-07-16 10:00:00")
+
+            reader = SignalReader(dsa_path, disciplined_path, market="cn")
+            ids = [s.id for s in reader.active_signals_before(date(2026, 7, 16))]
+
+            self.assertNotIn(1, ids)  # data_asof >= execution date: look-ahead
+            self.assertIn(2, ids)     # completed the prior evening
+            self.assertIn(3, ids)     # completed same day but before the open
+            self.assertNotIn(4, ids)  # completed after the open
 
     def test_reader_isolates_market_in_decision_signals_branch(self) -> None:
         # Same guard for the raw decision_signals fallback path (no disciplined store).

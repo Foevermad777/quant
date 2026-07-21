@@ -58,6 +58,7 @@ class PaperEngine:
         self.reader = SignalReader(
             self.config.dsa_db_path,
             disciplined_db_path,
+            stock_pool=self.config.stock_pool,
             market=self.config.market,
             use_disciplined_signals=self.config.use_disciplined_signals,
         )
@@ -125,7 +126,10 @@ class PaperEngine:
         self._process_position_triggers(execution_date, bars, logger, stats)
         self._process_exit_signals(execution_date, bars, logger, stats)
 
-        if analysis_count <= 0:
+        # Disciplined candidates are independent of same-day analysis_history
+        # rows (e.g. a resting plan on a day DSA failed), so an empty analysis
+        # day must not veto them. Mirrors executor/us/engine_us.py.
+        if analysis_count <= 0 and not open_candidates:
             logger.info("new_openings_skipped reason=no_analysis_history_for_date")
         elif not open_candidates:
             logger.info("new_openings_skipped reason=no_open_candidates")

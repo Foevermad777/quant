@@ -38,7 +38,7 @@ else
 fi
 
 log "action=start_g5_discipline_completion workers=4 timeout_seconds=30 fallback=deepseek slow_threshold_ms=15000 primary_failure_threshold=2"
-if /usr/bin/caffeinate -i "${PYTHON_BIN}" -m executor.discipline_completion --all-active --market cn --workers 4 --timeout-seconds 30 --fallback-provider deepseek --fallback-model deepseek-chat --fallback-timeout-seconds 20 --slow-threshold-ms 15000 --primary-failure-threshold 2 --retries 1 --retry-delay-seconds 1 >> "${G5_COMPLETION_LOG}" 2>&1; then
+if /usr/bin/caffeinate -i "${PYTHON_BIN}" -m executor.discipline_completion --all-active --market cn --stock-code 600519 --stock-code 300750 --stock-code 601318 --stock-code 600036 --stock-code 600900 --workers 4 --timeout-seconds 30 --fallback-provider deepseek --fallback-model deepseek-chat --fallback-timeout-seconds 20 --slow-threshold-ms 15000 --primary-failure-threshold 2 --retries 1 --retry-delay-seconds 1 >> "${G5_COMPLETION_LOG}" 2>&1; then
   log "action=finish_g5_discipline_completion status=ok log=${G5_COMPLETION_LOG}"
 else
   log "action=finish_g5_discipline_completion status=partial_or_failed log=${G5_COMPLETION_LOG}"

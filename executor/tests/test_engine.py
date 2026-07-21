@@ -276,6 +276,33 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(stats["sells"], 1)
         self.assertEqual(position["quantity"], 500)
 
+    def test_open_candidates_survive_a_day_without_analysis_rows(self) -> None:
+        # A resting plan must still execute on a day DSA produced no analysis
+        # rows (e.g. a failed batch): candidates come from prior-day signals,
+        # not from same-day analysis_history. The old gate skipped all new
+        # openings whenever analysis_count == 0. Mirrors the US engine.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            ledger_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            with sqlite3.connect(dsa_path) as conn:
+                _insert_analysis(conn, 1, "600900", "空仓者可逢低，等待回踩后分批建仓", "2026-07-05 12:00:00")
+                _insert_signal(conn, 1, "600900", "buy", 1)
+                _insert_bar(conn, "600900", "2026-07-06", 10.0, 10.5)
+
+            config = ExecutorConfig(
+                dsa_db_path=dsa_path,
+                ledger_db_path=ledger_path,
+                stock_pool=("600900",),
+            )
+            engine = PaperEngine(config)
+
+            stats = engine.run_day(date(2026, 7, 6))
+
+            self.assertEqual(stats["analysis_count"], 0)
+            self.assertEqual(stats["open_candidates"], 1)
+            self.assertEqual(stats["filled"], 1)
+
     def test_expired_sell_signal_never_reaches_exit_candidates(self) -> None:
         # Layer 1 of the stale-signal guard: the reader must not surface an
         # expired sell signal, so a held position is never sold off a stale plan.
@@ -349,7 +376,12 @@ class EngineTests(unittest.TestCase):
                 _insert_analysis(conn, 1, "600519", "买入", "2026-07-05 12:00:00")
                 _insert_analysis(conn, 2, "600036", "买入", "2026-07-05 12:00:00")
                 _insert_analysis(conn, 3, "600519", "观望", "2026-07-06 12:00:00")
-                _insert_signal(conn, 1, "600519", "buy", 1, entry_high=10.5, stop_loss=9.0)
+                # Signal 1 expires after its fill day: under the corrected
+                # opening gate (candidates independent of same-day analysis
+                # rows) a still-live buy signal would legitimately re-buy on
+                # 07-07 right after the stop-out; this test is about the
+                # limit-up block -> pending exit -> settlement chain only.
+                _insert_signal(conn, 1, "600519", "buy", 1, entry_high=10.5, stop_loss=9.0, expires_at="2026-07-06 15:00:00")
                 _insert_signal(conn, 2, "600036", "buy", 2, entry_high=12.0)
                 _insert_bar(conn, "600519", "2026-07-05", 10.0, 10.0)
                 _insert_bar(conn, "600036", "2026-07-05", 10.0, 10.0)

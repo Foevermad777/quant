@@ -117,12 +117,20 @@ run_with_timeout() {
   "$@" &
   pid=$!
   marker="${TMPDIR:-/tmp}/dsa_timeout_$$_${pid}"
+  # Watchdog polls a wall-clock deadline instead of one long sleep: `sleep N`
+  # is suspended during macOS system sleep, so a single sleep silently grants
+  # a hung payload extra wall time (the 07-18 5244s hang outlived its 1200s
+  # budget this way). Short sleeps re-check the real clock after every wake.
   (
-    sleep "${timeout_seconds}"
-    if kill -0 "${pid}" 2>/dev/null; then
-      : > "${marker}"
-      terminate_tree "${pid}"
-    fi
+    deadline=$(( $(date +%s) + timeout_seconds ))
+    while kill -0 "${pid}" 2>/dev/null; do
+      if [[ "$(date +%s)" -ge "${deadline}" ]]; then
+        : > "${marker}"
+        terminate_tree "${pid}"
+        break
+      fi
+      sleep 5
+    done
   ) &
   watchdog_pid=$!
 

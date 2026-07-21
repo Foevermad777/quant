@@ -22,6 +22,7 @@ fi
 
 exec /usr/bin/caffeinate -i "${PYTHON_BIN}" -m executor.discipline_completion \
   --all-active \
+  --market us \
   --store-db "${PAPER_US_DB}" \
   "${STOCK_ARGS[@]}" \
   --workers 4 \

@@ -83,6 +83,7 @@ def _cn_context(dsa_db: Optional[Path], store_db: Optional[Path]) -> MarketConte
     reader = SignalReader(
         dsa_path,
         store_path,
+        stock_pool=cfg.stock_pool,
         market=cfg.market,
         use_disciplined_signals=cfg.use_disciplined_signals,
     )

@@ -20,6 +20,8 @@ G5_DEFAULT_MODEL = "gemini-3.5-flash"
 G5_DEFAULT_FALLBACK_MODEL = "deepseek-chat"
 G5_COMPLETION_VERSION = "g5-minimal-v0.1"
 G5_SCHEMA_VERSION = "g5-discipline-v0.1"
+CN_MARKET = "cn"
+CN_STOCK_POOL = ("600519", "300750", "601318", "600036", "600900")
 
 
 @dataclass(frozen=True)
@@ -43,4 +45,4 @@ class ExecutorConfig:
     block_limit_up_open: bool = True
     block_limit_down_open: bool = True
     benchmark_codes: tuple = ("000300", "399300", "SH000300")
-    stock_pool: tuple = ("600519", "300750", "601318", "600036", "600900")
+    stock_pool: tuple = CN_STOCK_POOL

@@ -12,9 +12,12 @@ US_POOL = ("AAPL", "NVDA", "MSFT", "JPM", "SPCX")
 
 # A signal is genuinely live only if it is active AND not past its expiry day.
 # Mirrors executor/signal_reader.py and executor/us/signal_reader_us.py so the
-# dashboard reports what the executors would actually act on.
+# dashboard reports what the executors would actually act on. expires_at is
+# stored in UTC, so 'now' must be UTC too: with localtime, Beijing 00:00-08:00
+# sits one calendar day ahead of UTC and US signals show expired up to a day
+# before the executor drops them.
 _UNEXPIRED_PREDICATE = (
-    "status = 'active' and (expires_at is null or date(expires_at) >= date('now', 'localtime'))"
+    "status = 'active' and (expires_at is null or date(expires_at) >= date('now'))"
 )
 
 
@@ -95,11 +98,14 @@ def scan_summary(db_path: Path) -> dict[str, Any]:
         with _connect_readonly(db_path) as conn:
             if _table_exists(conn, "analysis_history"):
                 summary["counts"]["analysis_history"] = _scalar_int(conn, "select count(*) from analysis_history")
+                # analysis_history.created_at is LOCAL time (unlike the UTC
+                # decision_signals timestamps), so the 24h window must anchor on
+                # localtime — against plain 'now' (UTC) it silently spans ~32h.
                 summary["counts"]["analysis_24h"] = _scalar_int(
                     conn,
                     """
                     select count(*) from analysis_history
-                    where datetime(created_at) >= datetime('now', '-24 hours')
+                    where datetime(created_at) >= datetime('now', 'localtime', '-24 hours')
                     """,
                 )
                 summary["latest_analysis_at"] = _scalar(

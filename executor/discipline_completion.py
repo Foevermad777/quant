@@ -453,7 +453,13 @@ class DisciplinedSignalStore:
         stops the mirrored column from lying. Boundary matches the readers and
         *FillModel.expired_unfilled: still valid through the expiry day.
         """
-        today = (as_of or date.today()).isoformat()
+        # UTC basis: expires_at is stored in UTC. Local date.today() runs one
+        # day ahead of UTC between 00:00-08:00 Beijing, which would flip a US
+        # signal to 'expired' minutes before its final execution run (the 05:30
+        # wrapper sweeps right before the engine replays the just-closed ET
+        # session). datetime.utcnow() keeps the sweep on the same clock as the
+        # data.
+        today = (as_of or datetime.utcnow().date()).isoformat()
         with self._connect() as conn:
             try:
                 cursor = conn.execute(

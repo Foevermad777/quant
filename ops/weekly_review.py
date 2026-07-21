@@ -119,6 +119,24 @@ def load_signal_stats(reader: SignalReader, start: date, end: date) -> Dict[str,
             (start.isoformat(), end.isoformat()),
         ).fetchone()
         stats["signal_count"] = int(row["count"] if row else 0)
+        # eval_status is written by the external DSA evaluator, not this repo.
+        # If outcomes exist but none are 'completed' in-window, every outcome
+        # table below silently renders empty — surface that state explicitly so
+        # a stuck evaluator is visible instead of masquerading as "no data".
+        outcome_totals = conn.execute(
+            """
+            select count(*) as total,
+                   sum(case when eval_status = 'completed' then 1 else 0 end) as completed
+            from decision_signal_outcomes
+            where date(coalesce(updated_at, created_at)) between ? and ?
+            """,
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        stats["outcome_rows_in_window"] = int(outcome_totals["total"] or 0)
+        stats["outcome_completed_in_window"] = int(outcome_totals["completed"] or 0)
+        stats["outcome_evaluator_stalled"] = bool(
+            stats["outcome_rows_in_window"] > 0 and stats["outcome_completed_in_window"] == 0
+        )
         stats["outcome_by_horizon"] = conn.execute(
             """
             select horizon,
@@ -691,7 +709,7 @@ def _render_data_gaps(rows: Sequence[sqlite3.Row]) -> str:
 
 def build_report(start: date, end: date, config: Optional[ExecutorConfig] = None) -> str:
     config = config or ExecutorConfig()
-    reader = SignalReader(config.dsa_db_path)
+    reader = SignalReader(config.dsa_db_path, stock_pool=config.stock_pool)
     ledger = PaperLedger(config.ledger_db_path, config=config)
     ledger.initialize()
     signal_stats = load_signal_stats(reader, start, end)
@@ -718,7 +736,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = ExecutorConfig()
-    reader = SignalReader(config.dsa_db_path)
+    reader = SignalReader(config.dsa_db_path, stock_pool=config.stock_pool)
     fallback_end = reader.latest_trading_date() or date.today()
     end = _date_arg(args.end, fallback=fallback_end)
     start = _date_arg(args.start, fallback=end - timedelta(days=6))

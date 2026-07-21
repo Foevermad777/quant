@@ -73,6 +73,7 @@ def _loads_json(text: Any) -> Dict[str, Any]:
 US_MARKET_TZ = ZoneInfo("America/New_York")
 LOCAL_RUNTIME_TZ = ZoneInfo("Asia/Shanghai")
 US_REGULAR_OPEN_TIME = time(9, 30, 0)
+SQLITE_BUSY_TIMEOUT_SECONDS = 10.0
 TEMPORAL_COLUMNS = ("decision_timestamp", "market_phase", "data_asof", "bar_cutoff", "news_cutoff")
 
 
@@ -85,6 +86,7 @@ class UsSignalReader:
         stock_pool: Sequence[str] = US_STOCK_POOL,
         market: str = US_MARKET,
         use_disciplined_signals: bool = True,
+        sqlite_timeout_seconds: float = SQLITE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.disciplined_db_path = Path(disciplined_db_path) if disciplined_db_path is not None else None
@@ -93,19 +95,25 @@ class UsSignalReader:
             raise ValueError("US stock_pool must not be empty")
         self.market = market
         self.use_disciplined_signals = use_disciplined_signals
+        self.sqlite_timeout_seconds = sqlite_timeout_seconds
 
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self.db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        conn = sqlite3.connect(uri, uri=True, timeout=self.sqlite_timeout_seconds)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"pragma busy_timeout = {int(self.sqlite_timeout_seconds * 1000)}")
         return conn
 
     def _connect_disciplined(self) -> sqlite3.Connection:
+        # busy_timeout mirrors the CN reader: paper_us.db is also written by the
+        # G5 completion (WAL); without it a concurrent write can surface
+        # "database is locked" on read.
         if self.disciplined_db_path is None:
             raise FileNotFoundError("disciplined signal store is not configured")
         uri = f"file:{self.disciplined_db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
+        conn = sqlite3.connect(uri, uri=True, timeout=self.sqlite_timeout_seconds)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"pragma busy_timeout = {int(self.sqlite_timeout_seconds * 1000)}")
         return conn
 
     def _pool_placeholders(self) -> str:

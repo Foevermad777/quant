@@ -133,6 +133,26 @@ def load_signal_stats(reader: UsSignalReader, config: UsExecutorConfig, start: d
             (start.isoformat(), end.isoformat(), *pool_params),
         ).fetchone()
         stats["signal_count"] = int(row["count"] if row else 0)
+        # Mirrors ops/weekly_review.py: eval_status has no writer in this repo,
+        # so make a stuck external evaluator visible instead of rendering empty
+        # outcome tables that read as "no data".
+        outcome_totals = conn.execute(
+            f"""
+            select count(*) as total,
+                   sum(case when o.eval_status = 'completed' then 1 else 0 end) as completed
+            from decision_signal_outcomes o
+            join decision_signals s on s.id = o.signal_id
+            where date(coalesce(o.updated_at, o.created_at)) between ? and ?
+              and s.market = ?
+              and s.stock_code in ({placeholders})
+            """,
+            (start.isoformat(), end.isoformat(), *pool_params),
+        ).fetchone()
+        stats["outcome_rows_in_window"] = int(outcome_totals["total"] or 0)
+        stats["outcome_completed_in_window"] = int(outcome_totals["completed"] or 0)
+        stats["outcome_evaluator_stalled"] = bool(
+            stats["outcome_rows_in_window"] > 0 and stats["outcome_completed_in_window"] == 0
+        )
         stats["outcome_by_horizon"] = conn.execute(
             f"""
             select o.horizon,
