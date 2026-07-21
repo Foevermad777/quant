@@ -128,3 +128,9 @@
   - **裁定**：**不解禁 PCS**。样本极小（2 周、单边行情、新增 3 笔）不足以下结论，但没有任何证据支持放松闸门，且 in-sample 为负。`hard_conflict` 桶仍有效（#109 588200 是真正的"分析明确建议观望"），说明 taxonomy 的安全网没坏。
   - **真正该修的是源头标签**：把规则 9/10 的从属关系理顺——**判据应为"空仓者是否拿到了带价格条件的可执行入场计划"**：有 → `conditional_entry`；无（空仓者应完全回避）→ `position_context_split`。但注意：修好标签会让这 15 条转为 conditional_entry 并被 C 计划接纳，**效果与解禁 PCS 高度接近**，因此必须先 shadow。
   - **建议路径（待 CEO 拍板）**：沿用 B 方案既定纪律——先 **shadow 双写**（只记录"若标签修正会促成哪些挂单/成交"，不实际执行）累积 ≥10 交易日，与实际成交对照评估限价成交率/踏空率/接飞刀率，再决定是否切换。在此之前 C 计划继续以现有 6% 流量运行。
+
+- **Taxonomy 修复落地 + shadow 管道上线（CEO 批准后，当日实现）**：
+  - **修复①派生分类器**（`intent_resolution.classify_conflict_status`）：entry 分支改为"条件性证据优先于 position split，但 flat 侧为离场动作时永不判 conditional"。生产 G5 路径**零行为变化**（LLM 直给标签时派生分类器不参与裁定）——A/B 守护重放确认交易逐字不变（CN 4 笔 +0.95% / US 6 笔 +0.79%）。已记录的边际 delta：无 G5 payload 的 legacy 兜底路径（仅 disciplined store 缺失时启用）对"分持仓语境+条件买入"文本从 hard_conflict 改判 conditional_entry，锁进测试。
+  - **修复②提示词 v2 taxonomy**（`--intent-taxonomy`，默认 v1）：v2 以"空仓者是否拿到带价格条件的可执行入场计划"为判据重写规则 9/10，**默认 v1 生产不变**；shadow 评估通过后在两个 wrapper 加一个参数即切换。
+  - **shadow 管道**（`executor/shadow_intent.py`，新增）：每日在两侧 executor wrapper 内、引擎前运行（非致命），复用真实 reader（S1 闸门/`_latest_by_symbol`/`LimitFillModel`）计算"修正标签会促成哪些挂单/成交"，写各自 paper db 的 `shadow_intent_decisions` 表（CN/US 隔离）；持仓集按 trades 表**时点重建**（回填不受今日持仓污染——冒烟时抓到并修掉该时代错位）。`--report` 输出限价成交率/接飞刀率/持有标记收益。**shadow 是无状态逐信号记录，非组合模拟**（不复利、不占资金），组合级判断仍用真引擎重放。
+  - **验证**：新守卫 16 个（分类器 5 + 修正函数 7 + taxonomy 提示词 2 + shadow 4——含幂等、按时点持仓、supersede 去重、接飞刀标记）；全量 141 + ops 18 全绿；shadow 首成交清单与 A/B 真引擎重放逐字交叉核对一致。已对生产库回填 07-14~07-20（mode=backfill，评估期 ≥10 交易日从今晚 live 起算，回填期为 in-sample 参考）。首份报告：US 8 成交（3 production / 5 shadow-only，knife_rate 12.5%——NVDA #85 那把飞刀如实入账）；CN 3 成交全 production、shadow-only 0 成交。

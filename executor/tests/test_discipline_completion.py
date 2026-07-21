@@ -13,6 +13,7 @@ from executor.discipline_completion import (
     GeminiUsage,
     RoutedStructuredClient,
     _guardrail_payload,
+    build_completion_prompt,
     discipline_temporal_metadata,
     normalize_completion_payload,
 )
@@ -248,6 +249,41 @@ class DisciplinedSignalStoreExpiryTests(unittest.TestCase):
             self.assertEqual(got, {1: "expired", 2: "active", 3: "active"})
 
             self.assertEqual(store.expire_stale(as_of=date(2026, 7, 16)), 0)
+
+
+class IntentTaxonomyPromptTests(unittest.TestCase):
+    def test_v2_replaces_the_colliding_rules_and_default_stays_v1(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            store_path = Path(tmpdir) / "paper.db"
+            _init_dsa_db(dsa_path)
+            completer = DisciplineCompleter(dsa_db_path=dsa_path, store_db_path=store_path, client=FakeGeminiClient())
+            context = completer.loader.load(18)
+
+            v1 = build_completion_prompt(context, completer.discipline_skill_path)
+            v2 = build_completion_prompt(context, completer.discipline_skill_path, intent_taxonomy="v2")
+
+            # v1 keeps the production wording whose rules 9/10 collide.
+            self.assertIn("holders should hold but flat accounts should wait for a pullback", v1)
+            # v2 decides by the executable-entry-plan criterion and drops the old rule 9.
+            self.assertIn("executable, price-conditioned entry plan", v2)
+            self.assertNotIn("holders should hold but flat accounts should wait for a pullback", v2)
+            self.assertIn("only when holders and flat accounts diverge", v2)
+            # Shared rules stay identical in both versions.
+            self.assertIn("8. Use flat_account_action", v1)
+            self.assertIn("8. Use flat_account_action", v2)
+
+    def test_unknown_taxonomy_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dsa_path = Path(tmpdir) / "dsa.db"
+            _init_dsa_db(dsa_path)
+            with self.assertRaises(ValueError):
+                DisciplineCompleter(
+                    dsa_db_path=dsa_path,
+                    store_db_path=Path(tmpdir) / "paper.db",
+                    client=FakeGeminiClient(),
+                    intent_taxonomy="v3",
+                )
 
 
 class DisciplineCompletionTests(unittest.TestCase):

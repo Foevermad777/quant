@@ -805,7 +805,11 @@ class DisciplineCompleter:
         fallback_timeout_seconds: float = G5_DEFAULT_FALLBACK_TIMEOUT_SECONDS,
         slow_threshold_ms: int = G5_DEFAULT_SLOW_THRESHOLD_MS,
         primary_failure_threshold: int = G5_DEFAULT_PRIMARY_FAILURE_THRESHOLD,
+        intent_taxonomy: str = "v1",
     ) -> None:
+        if intent_taxonomy not in INTENT_TAXONOMY_RULES:
+            raise ValueError(f"unknown intent taxonomy: {intent_taxonomy!r}")
+        self.intent_taxonomy = intent_taxonomy
         self.loader = DsaSignalContextLoader(dsa_db_path)
         self.store = DisciplinedSignalStore(store_db_path)
         self.discipline_skill_path = Path(discipline_skill_path)
@@ -838,7 +842,7 @@ class DisciplineCompleter:
             )
 
         context = self.loader.load(source_signal_id)
-        prompt = build_completion_prompt(context, self.discipline_skill_path)
+        prompt = build_completion_prompt(context, self.discipline_skill_path, intent_taxonomy=self.intent_taxonomy)
         client = self._structured_completion_client()
         structured, usage = client.generate_json(prompt, DISCIPLINE_RESPONSE_SCHEMA)
         actual_model = _client_model(client)
@@ -1012,8 +1016,36 @@ class DisciplineCompleter:
         return _client_model(client) if client is not None else self.model
 
 
-def build_completion_prompt(context: CompletionContext, discipline_skill_path: Path) -> str:
+# Intent-taxonomy rules 9/10 by version. v1 is the production wording; its
+# rules 9 and 10 describe the same text ("holders hold, flat accounts buy the
+# pullback") and rule 9 wins, so ~94% of conditional entries were filed as
+# position_context_split (2026-07-21 finding). v2 decides by whether the flat
+# side is handed an executable, price-conditioned entry plan. v2 goes live only
+# after the shadow evaluation clears a cutover — flip --intent-taxonomy in the
+# daily wrappers, nowhere else.
+INTENT_TAXONOMY_RULES = {
+    "v1": (
+        "9. If text says holders should hold but flat accounts should wait for a pullback, return flat_account_action=watch, holding_action=hold, resolved_action=watch, conflict_status=position_context_split.",
+        "10. If text explicitly says watch/wait/do not buy while DSA action is buy/add, use conflict_status=hard_conflict. If text says buy only on dips/pullback/staged entry, use conflict_status=conditional_entry and do not make resolved_action buy.",
+    ),
+    "v2": (
+        "9. Decide conflict_status by whether a FLAT account is handed an executable, price-conditioned entry plan. If the text tells flat accounts to buy on a pullback/dip/staged entry into a stated zone or support level, use conflict_status=conditional_entry — even when holders are told to hold — and do not make resolved_action buy.",
+        "10. Use conflict_status=position_context_split only when holders and flat accounts diverge AND the flat side gets no executable entry condition (for example flat accounts should stay out entirely). If the text explicitly says watch/wait/do not buy with no entry condition while DSA action is buy/add, use conflict_status=hard_conflict.",
+    ),
+}
+
+
+def build_completion_prompt(
+    context: CompletionContext,
+    discipline_skill_path: Path,
+    *,
+    intent_taxonomy: str = "v1",
+) -> str:
     discipline_text = Path(discipline_skill_path).read_text(encoding="utf-8")
+    try:
+        taxonomy_rules = INTENT_TAXONOMY_RULES[intent_taxonomy]
+    except KeyError as exc:
+        raise ValueError(f"unknown intent taxonomy: {intent_taxonomy!r}") from exc
     prompt_input = {
         "dsa_decision_signal": _signal_prompt_fields(context.signal),
         "dsa_analysis_history": _analysis_prompt_fields(context.analysis),
@@ -1034,8 +1066,7 @@ def build_completion_prompt(context: CompletionContext, discipline_skill_path: P
             "6. If the DSA text is one-sided, set single_side_flag=true and lower confidence.",
             "7. Resolve execution intent separately for a flat account and an existing holder.",
             "8. Use flat_account_action for accounts with no current position, holding_action for accounts already holding the symbol, and resolved_action as the default flat-account execution action.",
-            "9. If text says holders should hold but flat accounts should wait for a pullback, return flat_account_action=watch, holding_action=hold, resolved_action=watch, conflict_status=position_context_split.",
-            "10. If text explicitly says watch/wait/do not buy while DSA action is buy/add, use conflict_status=hard_conflict. If text says buy only on dips/pullback/staged entry, use conflict_status=conditional_entry and do not make resolved_action buy.",
+            *taxonomy_rules,
             "",
             "Discipline framework text:",
             discipline_text,
@@ -1533,6 +1564,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=1, help="Per-signal retries for transient Gemini/network failures.")
     parser.add_argument("--retry-delay-seconds", type=float, default=1.0, help="Delay before retrying one signal.")
     parser.add_argument(
+        "--intent-taxonomy",
+        choices=sorted(INTENT_TAXONOMY_RULES),
+        default="v1",
+        help="Intent taxonomy prompt version. v2 fixes the rules-9/10 collision; keep v1 until the shadow evaluation clears the cutover.",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=G5_DEFAULT_WORKERS,
@@ -1561,6 +1598,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fallback_timeout_seconds=max(1.0, args.fallback_timeout_seconds),
         slow_threshold_ms=max(1, args.slow_threshold_ms),
         primary_failure_threshold=max(1, args.primary_failure_threshold),
+        intent_taxonomy=args.intent_taxonomy,
     )
     completer.store.initialize()
     expired = completer.store.expire_stale()

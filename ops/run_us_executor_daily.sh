@@ -33,5 +33,13 @@ else
   log "action=finish_us_g5_discipline_completion status=partial_or_failed log=${US_G5_LOG}"
 fi
 
+SHADOW_LOG="${LOG_DIR}/shadow_intent_us_$(date "+%Y%m%d").log"
+log "action=start_shadow_intent_probe market=us"
+if "${PYTHON_BIN}" -m executor.shadow_intent --market us >> "${SHADOW_LOG}" 2>&1; then
+  log "action=finish_shadow_intent_probe status=ok log=${SHADOW_LOG}"
+else
+  log "action=finish_shadow_intent_probe status=failed log=${SHADOW_LOG}"
+fi
+
 log "action=start_us_executor_daily"
 exec /usr/bin/caffeinate -i "${PYTHON_BIN}" -m executor.us

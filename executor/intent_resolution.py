@@ -181,10 +181,18 @@ def classify_conflict_status(
     if signal_group == resolved_group:
         return "consistent"
     if signal_group == "entry":
+        # Conditional evidence must be judged before the position split: a flat
+        # account handed a price-conditioned entry plan ("空仓者回踩支撑再买")
+        # is a conditional entry even when holders are told to hold. The old
+        # order made the split branch win unconditionally for the constant
+        # (watch, hold) pair G5 emits, so this branch could never fire.
+        # position_context_split is reserved for texts whose flat side gets no
+        # entry condition at all; a flat side told to exit/avoid is never a
+        # conditional entry.
+        if flat not in EXIT_ACTIONS and _has_any(text, _CONDITIONAL_ENTRY_TOKENS):
+            return "conditional_entry"
         if _has_position_split_text(text) or (flat != holding and holding in NEUTRAL_ACTIONS | EXIT_ACTIONS):
             return "position_context_split"
-        if _has_any(text, _CONDITIONAL_ENTRY_TOKENS):
-            return "conditional_entry"
         if _has_any(text, _NO_BUY_TOKENS + _WATCH_TOKENS):
             return "hard_conflict"
     if signal_group == "exit" and resolved_group != "exit":
@@ -192,6 +200,40 @@ def classify_conflict_status(
     if signal_group == "neutral" and resolved_group in {"entry", "exit"}:
         return "hard_conflict"
     return "hard_conflict"
+
+
+def corrected_conflict_status(
+    *,
+    conflict_status: Any,
+    conflict_reason: Any,
+    signal_action: Any,
+    flat_account_action: Any,
+    has_executable_entry_plan: bool,
+) -> str:
+    """Corrected taxonomy for stored G5 labels (2026-07-21 collision fix).
+
+    The G5 prompt's rules 9 and 10 describe the same text ("holders hold,
+    flat accounts buy the pullback"), and rule 9 wins, so ~94% of
+    conditional entries were filed as position_context_split and dropped.
+    Corrected judgment: a flat account handed an executable,
+    price-conditioned entry plan is a conditional entry;
+    position_context_split is reserved for texts whose flat side gets no
+    entry condition. Consumed by the shadow probe only until the shadow
+    evaluation clears a cutover — production selection must not call this.
+    """
+    status = _normalize_conflict_status(conflict_status)
+    if status != "position_context_split":
+        return status
+    if action_group(str(signal_action or "")) != "entry":
+        return status
+    if not has_executable_entry_plan:
+        return status
+    if normalize_action(flat_account_action) in EXIT_ACTIONS:
+        return status
+    reason = str(conflict_reason or "").lower()
+    if _has_any(reason, _CONDITIONAL_EVIDENCE_TOKENS):
+        return "conditional_entry"
+    return status
 
 
 def _select_effective_action(
@@ -292,6 +334,16 @@ _CONDITIONAL_ENTRY_TOKENS = (
     "wait for",
     "scale in",
     "staged",
+)
+
+# Evidence tokens for reclassifying a stored position_context_split label as a
+# conditional entry. Superset of _CONDITIONAL_ENTRY_TOKENS: G5 conflict_reason
+# text also uses zone phrasing ("在335-338美元支撑区间逢低分批吸纳").
+_CONDITIONAL_EVIDENCE_TOKENS = _CONDITIONAL_ENTRY_TOKENS + (
+    "支撑区间",
+    "support range",
+    "entry zone",
+    "入场区",
 )
 
 _WATCH_TOKENS = (
